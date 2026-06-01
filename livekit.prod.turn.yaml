@@ -1,0 +1,31 @@
+port: 7888
+
+redis:
+  address: redis:6379
+
+rtc:
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7882
+  use_external_ip: true
+
+keys:
+  devkey: supersecretdevkeyforlocaldemo123456
+
+turn:
+  enabled: true
+  # Публичный DNS для TURN, указывающий на ваш сервер/L4-LB.
+  # Пример: turn.vks.company.ru
+  domain: turn.example.com
+  # TURN over UDP (и STUN binding), обычно нужен почти всегда.
+  udp_port: 3478
+  # TURN over TLS для "жестких" B2B сетей.
+  tls_port: 5349
+  # Диапазон relay-портов TURN.
+  relay_range_start: 30000
+  relay_range_end: 40000
+  # Для варианта БЕЗ L4-балансировщика с TLS-терминацией включите cert/key:
+  # cert_file: /etc/livekit-turn/tls.crt
+  # key_file: /etc/livekit-turn/tls.key
+  # Для варианта С L4 TLS-терминацией:
+  # external_tls: true

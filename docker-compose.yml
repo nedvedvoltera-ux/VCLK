@@ -1,0 +1,17 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  egress:
+    image: livekit/egress:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      EGRESS_CONFIG_FILE: /etc/livekit-egress/config.yaml
+    volumes:
+      - ./egress.yaml:/etc/livekit-egress/config.yaml:ro
+      - ./recordings:/out

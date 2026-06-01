@@ -1,0 +1,11 @@
+api_key: devkey
+api_secret: supersecretdevkeyforlocaldemo123456
+ws_url: ws://livekit:7888
+
+redis:
+  address: redis:6379
+
+logging:
+  level: info
+
+template_port: 7980

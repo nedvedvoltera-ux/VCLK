@@ -1,0 +1,64 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ${LIVEKIT_CONFIG_FILE:-./livekit.prod.yaml}:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7888:7888/tcp"
+      - "7882:7882/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "30000-40000:30000-40000/udp"
+      - "50000-50100:50000-50100/udp"
+
+  egress:
+    image: livekit/egress:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - livekit
+    environment:
+      EGRESS_CONFIG_FILE: /etc/livekit-egress/config.yaml
+    volumes:
+      - ./egress.prod.yaml:/etc/livekit-egress/config.yaml:ro
+      - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+
+  server:
+    build:
+      context: ./server
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: 3101
+      LIVEKIT_URL: ws://livekit:7888
+      LIVEKIT_HTTP_URL: http://livekit:7888
+      RECORDING_OUTPUT_PREFIX: /out
+    volumes:
+      - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+    depends_on:
+      - livekit
+      - egress
+
+  web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    depends_on:
+      - server
+      - livekit
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  redis-data:

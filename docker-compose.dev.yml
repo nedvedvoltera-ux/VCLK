@@ -1,0 +1,81 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-dev-data:/data
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ./livekit.dev.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7888:7888/tcp"
+      - "7882:7882/tcp"
+      - "50000-50100:50000-50100/udp"
+
+  egress:
+    image: livekit/egress:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - livekit
+    environment:
+      EGRESS_CONFIG_FILE: /etc/livekit-egress/config.yaml
+    volumes:
+      - ./egress.dev.yaml:/etc/livekit-egress/config.yaml:ro
+      - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+
+  server:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: 3101
+      LIVEKIT_URL: ws://livekit:7888
+      LIVEKIT_HTTP_URL: http://livekit:7888
+      RECORDING_OUTPUT_PREFIX: /out
+    command: >
+      sh -c "if [ ! -d node_modules ] || [ -z \"$(ls -A node_modules 2>/dev/null)\" ];
+      then npm install; fi && npm run dev"
+    volumes:
+      - ./server:/app
+      - server-node-modules:/app/node_modules
+      - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+    ports:
+      - "3101:3101"
+    depends_on:
+      - livekit
+      - egress
+
+  web:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      VITE_BACKEND_TARGET: http://server:3101
+      VITE_LIVEKIT_SIGNALING_TARGET: ws://livekit:7888
+    command: >
+      sh -c "if [ ! -d node_modules ] || [ -z \"$(ls -A node_modules 2>/dev/null)\" ];
+      then npm install; fi && npm run dev -- --host 0.0.0.0 --port 5173"
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - server
+      - livekit
+
+volumes:
+  redis-dev-data:
+  server-node-modules:
+  web-node-modules:

@@ -1,0 +1,13 @@
+port: 7888
+
+redis:
+  address: localhost:6379
+
+rtc:
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7882
+  use_external_ip: false
+
+keys:
+  devkey: supersecretdevkeyforlocaldemo123456
