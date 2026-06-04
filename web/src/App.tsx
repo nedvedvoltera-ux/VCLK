@@ -7,6 +7,7 @@ import {
   type TrackReferenceOrPlaceholder,
 } from "@livekit/components-core";
 import {
+  ChatEntry,
   ConnectionStateToast,
   ControlBar,
   GridLayout,
@@ -14,6 +15,7 @@ import {
   LiveKitRoom,
   ParticipantTile,
   RoomAudioRenderer,
+  useChat,
   useCreateLayoutContext,
   useLocalParticipant,
   useParticipants,
@@ -62,6 +64,77 @@ function MeetParticipantTile({
   );
 }
 
+function MeetChatDrawer({
+  isOpen,
+  onClose,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  const { chatMessages, send, isSending } = useChat();
+  const messagesRef = useRef<HTMLUListElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
+  }, [chatMessages, isOpen]);
+
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const value = inputRef.current?.value?.trim() || "";
+    if (!value) {
+      return;
+    }
+    await send(value);
+    if (inputRef.current) {
+      inputRef.current.value = "";
+      inputRef.current.focus();
+    }
+  };
+
+  return (
+    <aside className={`meet-chat-drawer ${isOpen ? "is-open" : ""}`}>
+      <div className="lk-chat">
+        <div className="lk-chat-header">
+          <span>Сообщения</span>
+          <button type="button" className="lk-close-button" onClick={onClose} aria-label="Закрыть чат">
+            ×
+          </button>
+        </div>
+        <ul className="lk-list lk-chat-messages" ref={messagesRef}>
+          {chatMessages.map((msg, idx, allMsg) => {
+            const hideName = idx >= 1 && allMsg[idx - 1].from === msg.from;
+            const hideTimestamp = idx >= 1 && msg.timestamp - allMsg[idx - 1].timestamp < 60_000;
+            return (
+              <ChatEntry
+                key={msg.id ?? idx}
+                hideName={hideName}
+                hideTimestamp={hideName ? hideTimestamp : false}
+                entry={msg}
+              />
+            );
+          })}
+        </ul>
+        <form className="lk-chat-form" onSubmit={onSubmit}>
+          <input
+            ref={inputRef}
+            className="lk-form-control lk-chat-form-input"
+            type="text"
+            disabled={isSending}
+            placeholder="Введите сообщение..."
+            onInput={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onKeyUp={(event) => event.stopPropagation()}
+          />
+          <button type="submit" className="lk-button lk-chat-form-button" disabled={isSending}>
+            Отправить
+          </button>
+        </form>
+      </div>
+    </aside>
+  );
+}
+
 function MeetRoomLayout({
   roomName,
   inviteLink,
@@ -94,8 +167,16 @@ function MeetRoomLayout({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showParticipants, setShowParticipants] = useState(true);
   const [now, setNow] = useState(() => new Date());
+  const [isMobileViewport, setIsMobileViewport] = useState(
+    () => window.matchMedia("(max-width: 980px)").matches,
+  );
   const controlBarHostRef = useRef<HTMLDivElement | null>(null);
   const [controlBarElement, setControlBarElement] = useState<HTMLDivElement | null>(null);
+  const isChatOpen = Boolean(layoutContext.widget.state?.showChat);
+  const onToggleChat = () => {
+    layoutContext.widget.dispatch?.({ msg: "toggle_chat" });
+  };
+  const localIdentity = localParticipant.identity;
   const orderedTracks = useMemo(
     () =>
       [...tracks].sort((a, b) => {
@@ -115,6 +196,16 @@ function MeetRoomLayout({
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 980px)");
+    const onChange = (event: MediaQueryListEvent) => {
+      setIsMobileViewport(event.matches);
+    };
+    setIsMobileViewport(mediaQuery.matches);
+    mediaQuery.addEventListener("change", onChange);
+    return () => mediaQuery.removeEventListener("change", onChange);
   }, []);
 
   useEffect(() => {
@@ -277,6 +368,33 @@ function MeetRoomLayout({
     return () => document.removeEventListener("mousedown", onDocPointerDown);
   }, [settingsOpen]);
 
+  const localTrack = useMemo(
+    () =>
+      orderedTracks.find((trackRef) => trackRef.participant.identity === localIdentity) ??
+      orderedTracks[0],
+    [localIdentity, orderedTracks],
+  );
+
+  const remoteTracks = useMemo(
+    () => orderedTracks.filter((trackRef) => trackRef.participant.identity !== localIdentity),
+    [localIdentity, orderedTracks],
+  );
+
+  const mobilePrimaryTrack = useMemo(
+    () => remoteTracks[0] ?? localTrack,
+    [localTrack, remoteTracks],
+  );
+
+  const mobilePreviewTrack = useMemo(() => {
+    if (orderedTracks.length !== 2) {
+      return null;
+    }
+    const primaryTrackId = mobilePrimaryTrack ? getTrackReferenceId(mobilePrimaryTrack) : null;
+    return (
+      orderedTracks.find((trackRef) => getTrackReferenceId(trackRef) !== primaryTrackId) ?? null
+    );
+  }, [mobilePrimaryTrack, orderedTracks]);
+
   return (
     <LayoutContextProvider value={layoutContext}>
       <div className={`meet-room ${blurEnabled ? "room-root--blur-local" : ""}`}>
@@ -305,9 +423,59 @@ function MeetRoomLayout({
         </header>
         {recordingError ? <p className="meet-record-error">{recordingError}</p> : null}
 
-        <section className={`meet-stage ${showParticipants ? "meet-stage--with-panel" : ""}`}>
+        <section className="meet-stage">
+          <MeetChatDrawer isOpen={isChatOpen} onClose={onToggleChat} />
+          <aside className={`meet-participants-drawer ${showParticipants ? "is-open" : ""}`}>
+            <div className="meet-participants-panel">
+              <h3>Участники</h3>
+              <ul>
+                {participants.map((participant) => (
+                  <li key={participant.identity} className={participant.isSpeaking ? "is-speaking" : ""}>
+                    <span>{participant.name || participant.identity}</span>
+                    <small>{participant.isSpeaking ? "говорит" : "в сети"}</small>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </aside>
           <div className="meet-main-stage">
-            {layoutMode === "focus" ? (
+            {isMobileViewport ? (
+              orderedTracks.length <= 1 ? (
+                <div className="meet-mobile-single">
+                  {mobilePrimaryTrack ? (
+                    <MeetParticipantTile trackRef={mobilePrimaryTrack} className="meet-main-tile" />
+                  ) : (
+                    <div className="meet-empty-tile">Ожидание видео...</div>
+                  )}
+                </div>
+              ) : orderedTracks.length === 2 ? (
+                <div className="meet-mobile-two-layout">
+                  {mobilePrimaryTrack ? (
+                    <MeetParticipantTile trackRef={mobilePrimaryTrack} className="meet-main-tile" />
+                  ) : (
+                    <div className="meet-empty-tile">Ожидание видео...</div>
+                  )}
+                  {mobilePreviewTrack ? (
+                    <div className="meet-mobile-self-preview">
+                      <MeetParticipantTile trackRef={mobilePreviewTrack} />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  className="meet-mobile-stack"
+                  style={{
+                    gridTemplateRows: `repeat(${orderedTracks.length}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {orderedTracks.map((trackRef) => (
+                    <div className="meet-mobile-stack-item" key={getTrackReferenceId(trackRef)}>
+                      <MeetParticipantTile trackRef={trackRef} />
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : layoutMode === "focus" ? (
               <div className="meet-focus-layout">
                 <aside className="meet-focus-thumbs">
                   {orderedTracks.map((trackRef) => {
@@ -339,20 +507,6 @@ function MeetRoomLayout({
               </GridLayout>
             )}
           </div>
-
-          {showParticipants ? (
-            <aside className="meet-participants-panel">
-              <h3>Участники</h3>
-              <ul>
-                {participants.map((participant) => (
-                  <li key={participant.identity} className={participant.isSpeaking ? "is-speaking" : ""}>
-                    <span>{participant.name || participant.identity}</span>
-                    <small>{participant.isSpeaking ? "говорит" : "в сети"}</small>
-                  </li>
-                ))}
-              </ul>
-            </aside>
-          ) : null}
         </section>
 
         <footer className="meet-controls-shell">
@@ -364,7 +518,7 @@ function MeetRoomLayout({
                 microphone: true,
                 camera: true,
                 screenShare: true,
-                chat: false,
+                chat: true,
                 settings: false,
                 leave: false,
               }}
