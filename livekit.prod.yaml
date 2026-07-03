@@ -7,7 +7,8 @@ rtc:
   port_range_start: 50000
   port_range_end: 50100
   tcp_port: 7882
-  use_external_ip: true
+  use_external_ip: false
+  # node_ip: <your-server-lan-ip>  # set on internal networks without public IP
 
 keys:
   devkey: supersecretdevkeyforlocaldemo123456

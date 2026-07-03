@@ -24,6 +24,9 @@ export default defineConfig({
       "/recordings": {
         target: backendTarget,
       },
+      "/avatar": {
+        target: backendTarget,
+      },
       "/livekit": {
         target: livekitSignalingTarget,
         ws: true,

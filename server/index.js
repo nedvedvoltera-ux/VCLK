@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const express = require("express");
 const cors = require("cors");
 const { AccessToken, EgressClient } = require("livekit-server-sdk");
@@ -26,6 +27,7 @@ const recordingsViewerUser = process.env.RECORDINGS_VIEW_USER || "viewer";
 const recordingsViewerPassword = process.env.RECORDINGS_VIEW_PASSWORD || "";
 const egressClient = new EgressClient(livekitHttpUrl, apiKey, apiSecret);
 const recordingByRoom = new Map();
+const avatarById = new Map();
 const getEgressTroubleshootingHint = (error) => {
   const message = String(error?.message || "").toLowerCase();
   const code = String(error?.code || "").toLowerCase();
@@ -46,10 +48,88 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/token", async (req, res) => {
-  const roomName = String(req.query.room || "").trim();
-  const username = String(req.query.username || "").trim();
+const buildToken = async ({ roomName, username, avatarUrl }) => {
+  const metadata =
+    typeof avatarUrl === "string" && avatarUrl.length > 0
+      ? JSON.stringify({ avatarUrl })
+      : undefined;
+  const token = new AccessToken(apiKey, apiSecret, {
+    identity: username,
+    name: username,
+    ttl: "2h",
+    metadata,
+  });
 
+  token.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canSubscribe: true,
+    canUpdateOwnMetadata: true,
+  });
+
+  return token.toJwt();
+};
+
+const sanitizeAvatarUrl = (value) => {
+  const avatarUrl = String(value || "").trim();
+  if (!avatarUrl.startsWith("/avatar/")) {
+    return "";
+  }
+  return avatarUrl;
+};
+
+const parseAvatarDataUrl = (imageDataUrl) => {
+  const value = String(imageDataUrl || "").trim();
+  const match = value.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+  if (!match) {
+    return null;
+  }
+  const mimeType = match[1];
+  const base64Payload = match[2];
+  const buffer = Buffer.from(base64Payload, "base64");
+  if (buffer.length === 0 || buffer.length > 256 * 1024) {
+    return null;
+  }
+  return { mimeType, buffer };
+};
+
+const getAvatarExtension = (mimeType) => {
+  if (mimeType === "image/png") {
+    return "png";
+  }
+  if (mimeType === "image/webp") {
+    return "webp";
+  }
+  return "jpg";
+};
+
+app.post("/avatar", (req, res) => {
+  const parsed = parseAvatarDataUrl(req.body?.imageDataUrl);
+  if (!parsed) {
+    return res.status(400).json({ error: "imageDataUrl must be a valid data:image URL" });
+  }
+  const id = `${crypto.randomUUID()}.${getAvatarExtension(parsed.mimeType)}`;
+  avatarById.set(id, {
+    mimeType: parsed.mimeType,
+    buffer: parsed.buffer,
+    createdAt: Date.now(),
+  });
+  return res.json({ ok: true, avatarUrl: `/avatar/${id}` });
+});
+
+app.get("/avatar/:id", (req, res) => {
+  const id = String(req.params.id || "");
+  const avatar = avatarById.get(id);
+  if (!avatar) {
+    return res.status(404).send("Avatar not found");
+  }
+  res.set("Content-Type", avatar.mimeType);
+  res.set("Cache-Control", "public, max-age=86400");
+  return res.send(avatar.buffer);
+});
+
+const handleTokenRequest = async ({ roomName, username, avatarUrl, res }) => {
   if (!roomName || !username) {
     return res.status(400).json({
       error: "Both query params are required: room and username",
@@ -57,20 +137,11 @@ app.get("/token", async (req, res) => {
   }
 
   try {
-    const token = new AccessToken(apiKey, apiSecret, {
-      identity: username,
-      name: username,
-      ttl: "2h",
+    const jwt = await buildToken({
+      roomName,
+      username,
+      avatarUrl: sanitizeAvatarUrl(avatarUrl),
     });
-
-    token.addGrant({
-      roomJoin: true,
-      room: roomName,
-      canPublish: true,
-      canSubscribe: true,
-    });
-
-    const jwt = await token.toJwt();
 
     return res.json({
       token: jwt,
@@ -80,6 +151,24 @@ app.get("/token", async (req, res) => {
     console.error("Failed to create token:", error);
     return res.status(500).json({ error: "Failed to create access token" });
   }
+};
+
+app.get("/token", async (req, res) => {
+  await handleTokenRequest({
+    roomName: String(req.query.room || "").trim(),
+    username: String(req.query.username || "").trim(),
+    avatarUrl: req.query.avatarUrl,
+    res,
+  });
+});
+
+app.post("/token", async (req, res) => {
+  await handleTokenRequest({
+    roomName: String(req.body?.room || "").trim(),
+    username: String(req.body?.username || "").trim(),
+    avatarUrl: req.body?.avatarUrl,
+    res,
+  });
 });
 
 const toSafeSlug = (value) =>

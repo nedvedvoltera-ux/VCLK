@@ -28,6 +28,12 @@ type TokenResponse = {
   token: string;
 };
 
+type AvatarUploadResponse = {
+  avatarUrl: string;
+};
+
+type NetworkQuality = "low" | "medium" | "high" | "unknown";
+
 function MeetParticipantTile({
   trackRef,
   className,
@@ -36,7 +42,26 @@ function MeetParticipantTile({
   className?: string;
 }) {
   const participant = trackRef?.participant;
-  const avatarUrl = participant?.attributes?.avatarDataUrl;
+  const metadataAvatar = useMemo(() => {
+    const rawMetadata = participant?.metadata;
+    if (!rawMetadata) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(rawMetadata) as { avatarDataUrl?: unknown; avatarUrl?: unknown };
+      if (typeof parsed.avatarUrl === "string" && parsed.avatarUrl.length > 0) {
+        return parsed.avatarUrl;
+      }
+      return typeof parsed.avatarDataUrl === "string" ? parsed.avatarDataUrl : null;
+    } catch {
+      return null;
+    }
+  }, [participant?.metadata]);
+  const avatarUrl =
+    metadataAvatar ||
+    (typeof participant?.attributes?.avatarDataUrl === "string"
+      ? participant.attributes.avatarDataUrl
+      : null);
   const isSpeaking = Boolean(participant?.isSpeaking);
   const participantLabel = participant?.name || participant?.identity || "Участник";
   const hasVideo =
@@ -47,7 +72,7 @@ function MeetParticipantTile({
 
   return (
     <div
-      className={`meet-participant-shell ${className ?? ""} ${isSpeaking ? "is-speaking" : ""}`}
+      className={`meet-participant-shell ${className ?? ""} ${isSpeaking ? "is-speaking" : ""} ${avatarUrl ? "has-custom-avatar" : ""}`}
     >
       <ParticipantTile trackRef={trackRef} />
       {isSpeaking ? (
@@ -139,15 +164,11 @@ function MeetRoomLayout({
   roomName,
   inviteLink,
   backendUrl,
-  blurEnabled,
-  avatarDataUrl,
   onLeave,
 }: {
   roomName: string;
   inviteLink: string;
   backendUrl: string;
-  blurEnabled: boolean;
-  avatarDataUrl: string | null;
   onLeave: () => void;
 }) {
   const participants = useParticipants();
@@ -260,20 +281,6 @@ function MeetRoomLayout({
     }, 4000);
     return () => clearInterval(timer);
   }, [fetchRecordingState]);
-
-  useEffect(() => {
-    if (!avatarDataUrl) {
-      return;
-    }
-    const syncAvatar = async () => {
-      try {
-        await localParticipant.setAttributes({ avatarDataUrl });
-      } catch {
-        // keep UI resilient if attributes are unavailable
-      }
-    };
-    void syncAvatar();
-  }, [avatarDataUrl, localParticipant]);
 
   const timeLabel = useMemo(
     () =>
@@ -397,7 +404,7 @@ function MeetRoomLayout({
 
   return (
     <LayoutContextProvider value={layoutContext}>
-      <div className={`meet-room ${blurEnabled ? "room-root--blur-local" : ""}`}>
+      <div className="meet-room">
         <header className="meet-topbar">
           <div className="meet-topbar-left">
             <p>{timeLabel}</p>
@@ -482,14 +489,21 @@ function MeetRoomLayout({
                     const trackId = getTrackReferenceId(trackRef);
                     const isActive = trackId === activeTrackId;
                     return (
-                      <button
+                      <div
                         key={trackId}
-                        type="button"
+                        role="button"
+                        tabIndex={0}
                         className={`meet-thumb-button ${isActive ? "is-active" : ""}`}
                         onClick={() => setSelectedTrackId(trackId)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setSelectedTrackId(trackId);
+                          }
+                        }}
                       >
                         <MeetParticipantTile trackRef={trackRef} />
-                      </button>
+                      </div>
                     );
                   })}
                 </aside>
@@ -601,7 +615,7 @@ function App() {
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
-  const [blurEnabled, setBlurEnabled] = useState(false);
+  const [estimatedBandwidthMbps, setEstimatedBandwidthMbps] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const signalingProxyUrl = useMemo(() => {
     const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -631,10 +645,20 @@ function App() {
   }, [selectedVideoDeviceId]);
 
   useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices || !window.isSecureContext) {
+      const httpsPort = window.location.protocol === "https:" ? window.location.port : "8443";
+      const portSuffix = httpsPort ? `:${httpsPort}` : "";
+      setPreviewError(
+        `Для камеры и микрофона нужен HTTPS: https://${window.location.hostname}${portSuffix}/ — подтвердите сертификат в браузере.`,
+      );
+      return;
+    }
+
     let isCancelled = false;
     const loadDevices = async () => {
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
+        const devices = await mediaDevices.enumerateDevices();
         if (isCancelled) {
           return;
         }
@@ -655,11 +679,11 @@ function App() {
       }
     };
 
-    loadDevices();
-    navigator.mediaDevices.addEventListener("devicechange", loadDevices);
+    void loadDevices();
+    mediaDevices.addEventListener("devicechange", loadDevices);
     return () => {
       isCancelled = true;
-      navigator.mediaDevices.removeEventListener("devicechange", loadDevices);
+      mediaDevices.removeEventListener("devicechange", loadDevices);
     };
   }, [selectedAudioDeviceId, selectedVideoDeviceId]);
 
@@ -677,8 +701,12 @@ function App() {
 
     const startPreview = async () => {
       setPreviewError(null);
+      const mediaDevices = navigator.mediaDevices;
+      if (!mediaDevices || !window.isSecureContext) {
+        return;
+      }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const stream = await mediaDevices.getUserMedia({
           video: selectedVideoDeviceId
             ? { deviceId: { exact: selectedVideoDeviceId } }
             : true,
@@ -727,6 +755,50 @@ function App() {
     }
     videoRef.current.srcObject = previewStream;
   }, [previewStream]);
+
+  useEffect(() => {
+    const connection = (
+      navigator as Navigator & {
+        connection?: {
+          downlink?: number;
+          addEventListener?: (type: "change", listener: () => void) => void;
+          removeEventListener?: (type: "change", listener: () => void) => void;
+        };
+      }
+    ).connection;
+    if (!connection) {
+      setEstimatedBandwidthMbps(null);
+      return;
+    }
+
+    const updateBandwidth = () => {
+      const downlink = connection.downlink;
+      if (typeof downlink === "number" && Number.isFinite(downlink)) {
+        setEstimatedBandwidthMbps(downlink);
+      } else {
+        setEstimatedBandwidthMbps(null);
+      }
+    };
+
+    updateBandwidth();
+    connection.addEventListener?.("change", updateBandwidth);
+    return () => {
+      connection.removeEventListener?.("change", updateBandwidth);
+    };
+  }, []);
+
+  const networkQuality = useMemo<NetworkQuality>(() => {
+    if (estimatedBandwidthMbps === null) {
+      return "unknown";
+    }
+    if (estimatedBandwidthMbps < 5) {
+      return "low";
+    }
+    if (estimatedBandwidthMbps <= 15) {
+      return "medium";
+    }
+    return "high";
+  }, [estimatedBandwidthMbps]);
 
   useEffect(() => {
     if (!previewStream) {
@@ -781,14 +853,14 @@ function App() {
     const side = Math.min(video.videoWidth, video.videoHeight);
     const sx = Math.max(0, (video.videoWidth - side) / 2);
     const sy = Math.max(0, (video.videoHeight - side) / 2);
-    canvas.width = 240;
-    canvas.height = 240;
+    canvas.width = 192;
+    canvas.height = 192;
     const context = canvas.getContext("2d");
     if (!context) {
       return;
     }
     context.drawImage(video, sx, sy, side, side, 0, 0, canvas.width, canvas.height);
-    setAvatarDataUrl(canvas.toDataURL("image/jpeg", 0.8));
+    setAvatarDataUrl(canvas.toDataURL("image/jpeg", 0.82));
   };
 
   const onJoin = async (event: FormEvent<HTMLFormElement>) => {
@@ -800,12 +872,31 @@ function App() {
     setIsJoining(true);
     setError(null);
 
-    const endpoint = new URL("/token", backendUrl);
-    endpoint.searchParams.set("room", room.trim());
-    endpoint.searchParams.set("username", username.trim());
-
     try {
-      const response = await fetch(endpoint);
+      let avatarUrlForToken = "";
+      if (avatarDataUrl) {
+        const avatarEndpoint = new URL("/avatar", backendUrl);
+        const avatarResponse = await fetch(avatarEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ imageDataUrl: avatarDataUrl }),
+        });
+        if (avatarResponse.ok) {
+          const avatarPayload = (await avatarResponse.json()) as AvatarUploadResponse;
+          avatarUrlForToken = avatarPayload.avatarUrl;
+        }
+      }
+
+      const endpoint = new URL("/token", backendUrl);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: room.trim(),
+          username: username.trim(),
+          avatarUrl: avatarUrlForToken,
+        }),
+      });
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || "Failed to get token");
@@ -843,8 +934,6 @@ function App() {
             roomName={room}
             inviteLink={inviteLink}
             backendUrl={backendUrl}
-            blurEnabled={blurEnabled}
-            avatarDataUrl={avatarDataUrl}
             onLeave={() => setToken(null)}
           />
         </LiveKitRoom>
@@ -867,7 +956,7 @@ function App() {
             <div className="preview-wrap">
               <video
                 ref={videoRef}
-                className={`preview-video ${blurEnabled ? "preview-video--blur" : ""}`}
+                className="preview-video"
                 autoPlay
                 muted
                 playsInline
@@ -880,14 +969,6 @@ function App() {
               <button type="button" className="secondary-btn" onClick={onCapturePhoto}>
                 Заснять
               </button>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={blurEnabled}
-                  onChange={(event) => setBlurEnabled(event.target.checked)}
-                />
-                Размытый фон (локально)
-              </label>
             </div>
             <div className="diagnostics-stats">
               <div className="mic-meter" aria-label="microphone level">
@@ -897,6 +978,15 @@ function App() {
                 Микрофон: {previewStream?.getAudioTracks()[0] ? "OK" : "Нет сигнала"} |
                 Камера: {previewStream?.getVideoTracks()[0] ? "OK" : "Нет сигнала"}
               </p>
+              <div className={`net-indicator net-indicator--${networkQuality}`}>
+                <span className="net-indicator-dot" />
+                <span>
+                  Интернет:{" "}
+                  {estimatedBandwidthMbps === null
+                    ? "нет данных"
+                    : `${estimatedBandwidthMbps.toFixed(1)} Мбит/с`}
+                </span>
+              </div>
             </div>
             {previewError ? <p className="error">{previewError}</p> : null}
             <div className="diag-devices">

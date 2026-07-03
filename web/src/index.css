@@ -247,22 +247,21 @@ summary {
 
 .preview-wrap {
   position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
   border: 1px solid var(--border-color);
   background: #020617;
-  min-height: 180px;
 }
 
 .preview-video {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: 100%;
   object-fit: cover;
   display: block;
-}
-
-.preview-video--blur {
-  filter: blur(8px) saturate(1.08);
 }
 
 .preview-fallback {
@@ -290,14 +289,6 @@ summary {
   cursor: pointer;
 }
 
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: #c5d5ee;
-}
-
 .diagnostics-stats {
   display: grid;
   gap: 6px;
@@ -307,6 +298,52 @@ summary {
   margin: 0;
   color: #9eb1cd;
   font-size: 12px;
+}
+
+.net-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid #334155;
+  background: #0f1a2f;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.net-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.net-indicator--low {
+  border-color: rgba(239, 68, 68, 0.55);
+  color: #fecaca;
+}
+
+.net-indicator--low .net-indicator-dot {
+  background: #ef4444;
+}
+
+.net-indicator--medium {
+  border-color: rgba(234, 179, 8, 0.55);
+  color: #fef08a;
+}
+
+.net-indicator--medium .net-indicator-dot {
+  background: #eab308;
+}
+
+.net-indicator--high {
+  border-color: rgba(34, 197, 94, 0.55);
+  color: #bbf7d0;
+}
+
+.net-indicator--high .net-indicator-dot {
+  background: #22c55e;
 }
 
 .mic-meter {
@@ -335,10 +372,6 @@ summary {
   --lk-accent-bg: #2563eb;
   --lk-button-hover-bg: #1d4ed8;
   height: 100vh;
-}
-
-.room-root--blur-local .lk-participant-tile[data-lk-local-participant="true"] video {
-  filter: blur(8px) saturate(1.04);
 }
 
 .meet-room {
@@ -756,6 +789,16 @@ summary {
   height: 100%;
 }
 
+.meet-participant-shell.has-custom-avatar .lk-participant-placeholder,
+.meet-participant-shell.has-custom-avatar [class*="participant-placeholder"] {
+  opacity: 0 !important;
+}
+
+.meet-participant-shell.has-custom-avatar .lk-participant-placeholder *,
+.meet-participant-shell.has-custom-avatar [class*="participant-placeholder"] * {
+  opacity: 0 !important;
+}
+
 .meet-participant-shell .lk-participant-metadata,
 .meet-grid .lk-participant-metadata {
   background: transparent;
@@ -800,14 +843,22 @@ summary {
   place-items: center;
   background: radial-gradient(circle at center, rgba(15, 23, 42, 0.22), #0b1220 75%);
   pointer-events: none;
+  opacity: 0.18;
 }
 
 .meet-avatar-overlay img {
-  width: min(30%, 140px);
+  width: clamp(72px, 22%, 220px);
+  max-width: 42vmin;
+  min-width: 56px;
   aspect-ratio: 1 / 1;
   object-fit: cover;
   border-radius: 50%;
-  border: 3px solid #cbd5e1;
+  border: clamp(2px, 0.22vw, 4px) solid #cbd5e1;
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.45);
+}
+
+.meet-main-tile .meet-avatar-overlay {
+  opacity: 1;
 }
 
 .meet-controls-shell {
@@ -830,6 +881,7 @@ summary {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   display: inline-flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 10px;
 }
 
@@ -860,8 +912,17 @@ summary {
   background: rgba(148, 163, 184, 0.12);
 }
 
+.meet-layout-icon-btn.is-active {
+  background: rgba(37, 99, 235, 0.24);
+  color: #bfdbfe;
+}
+
 .meet-toolbar-menu-wrapper {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
 }
 
 .meet-toolbar-menu {

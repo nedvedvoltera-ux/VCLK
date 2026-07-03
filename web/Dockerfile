@@ -10,7 +10,11 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+RUN apk add --no-cache openssl
 
-EXPOSE 80
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.ssl.conf /etc/nginx/conf.d/default.conf
+COPY docker-entrypoint.d/40-tls-setup.sh /docker-entrypoint.d/40-tls-setup.sh
+RUN chmod +x /docker-entrypoint.d/40-tls-setup.sh
+
+EXPOSE 80 443
