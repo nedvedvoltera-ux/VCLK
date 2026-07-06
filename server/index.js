@@ -8,6 +8,7 @@ const cors = require("cors");
 const { AccessToken, EgressClient } = require("livekit-server-sdk");
 
 const app = express();
+app.set("trust proxy", 1);
 const port = Number(process.env.PORT || 3101);
 
 const livekitUrl = process.env.LIVEKIT_URL || "ws://localhost:7888";
@@ -25,6 +26,10 @@ const recordingsDir =
     : path.resolve(__dirname, "..", "recordings"));
 const recordingsViewerUser = process.env.RECORDINGS_VIEW_USER || "viewer";
 const recordingsViewerPassword = process.env.RECORDINGS_VIEW_PASSWORD || "";
+const recordingsSessionCookie = "recordings_session";
+const recordingsSessionTtlMs = 12 * 60 * 60 * 1000;
+const recordingsSessionSecret =
+  process.env.RECORDINGS_SESSION_SECRET || process.env.LIVEKIT_API_SECRET || apiSecret;
 const egressClient = new EgressClient(livekitHttpUrl, apiKey, apiSecret);
 const recordingByRoom = new Map();
 const avatarById = new Map();
@@ -198,34 +203,236 @@ const parseBasicAuth = (headerValue) => {
   }
 };
 
+const parseCookies = (headerValue) => {
+  const cookies = {};
+  if (!headerValue) {
+    return cookies;
+  }
+  for (const part of headerValue.split(";")) {
+    const [rawKey, ...rawValue] = part.trim().split("=");
+    if (!rawKey) {
+      continue;
+    }
+    cookies[rawKey] = decodeURIComponent(rawValue.join("=") || "");
+  }
+  return cookies;
+};
+
+const signRecordingsSession = (expiresAt) => {
+  const payload = `${recordingsViewerUser}:${expiresAt}`;
+  return crypto.createHmac("sha256", recordingsSessionSecret).update(payload).digest("hex");
+};
+
+const createRecordingsSessionToken = () => {
+  const expiresAt = Date.now() + recordingsSessionTtlMs;
+  return `${expiresAt}.${signRecordingsSession(expiresAt)}`;
+};
+
+const verifyRecordingsSessionToken = (token) => {
+  if (!token) {
+    return false;
+  }
+  const separatorIndex = token.indexOf(".");
+  if (separatorIndex < 0) {
+    return false;
+  }
+  const expiresAt = Number(token.slice(0, separatorIndex));
+  const signature = token.slice(separatorIndex + 1);
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now() || !signature) {
+    return false;
+  }
+  const expected = signRecordingsSession(expiresAt);
+  if (signature.length !== expected.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+};
+
+const isRecordingsAuthorized = (req) => {
+  if (!recordingsViewerPassword) {
+    return false;
+  }
+  const credentials = parseBasicAuth(req.headers.authorization);
+  if (
+    credentials &&
+    credentials.username === recordingsViewerUser &&
+    credentials.password === recordingsViewerPassword
+  ) {
+    return true;
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  return verifyRecordingsSessionToken(cookies[recordingsSessionCookie]);
+};
+
+const setRecordingsSessionCookie = (res, req) => {
+  const token = createRecordingsSessionToken();
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https";
+  const parts = [
+    `${recordingsSessionCookie}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${Math.floor(recordingsSessionTtlMs / 1000)}`,
+  ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  res.setHeader("Set-Cookie", parts.join("; "));
+};
+
+const clearRecordingsSessionCookie = (res) => {
+  res.setHeader("Set-Cookie", `${recordingsSessionCookie}=; Path=/; HttpOnly; Max-Age=0`);
+};
+
+const renderRecordingsLoginPage = ({ error = false, nextPath = "/recordings" } = {}) => {
+  const safeNext = nextPath.startsWith("/recordings") ? nextPath : "/recordings";
+  const errorHtml = error
+    ? '<p class="error">Неверный логин или пароль. Попробуйте снова.</p>'
+    : "";
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Вход — записи встреч</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: Arial, sans-serif;
+        background: #0b1220;
+        color: #e2e8f0;
+      }
+      .card {
+        width: min(420px, calc(100vw - 32px));
+        border: 1px solid #334155;
+        border-radius: 14px;
+        background: #111827;
+        padding: 24px;
+        box-shadow: 0 16px 40px rgba(2, 6, 23, 0.45);
+      }
+      h1 { margin: 0 0 8px; font-size: 24px; }
+      p { margin: 0 0 16px; color: #94a3b8; line-height: 1.5; }
+      label { display: grid; gap: 6px; margin-bottom: 14px; font-size: 14px; }
+      input {
+        border: 1px solid #475569;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #f8fafc;
+        padding: 10px 12px;
+        font-size: 15px;
+      }
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        background: #2563eb;
+        color: #fff;
+        padding: 11px 14px;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      button:hover { background: #1d4ed8; }
+      .error {
+        margin: 0 0 14px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        color: #fecaca;
+      }
+    </style>
+  </head>
+  <body>
+    <form class="card" method="post" action="/recordings/login">
+      <h1>Записи встреч</h1>
+      <p>Введите логин и пароль для просмотра архива записей.</p>
+      ${errorHtml}
+      <input type="hidden" name="next" value="${safeNext.replace(/"/g, "&quot;")}" />
+      <label>
+        Логин
+        <input name="username" autocomplete="username" required />
+      </label>
+      <label>
+        Пароль
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit">Войти</button>
+    </form>
+  </body>
+</html>`;
+};
+
 const requireRecordingsAuth = (req, res, next) => {
   if (!recordingsViewerPassword) {
     return res.status(503).send("Recordings viewer password is not configured");
   }
 
-  const credentials = parseBasicAuth(req.headers.authorization);
-  const isAuthorized =
-    credentials &&
-    credentials.username === recordingsViewerUser &&
-    credentials.password === recordingsViewerPassword;
-
-  if (!isAuthorized) {
-    res.set("WWW-Authenticate", 'Basic realm="LiveKit recordings"');
-    return res.status(401).send("Authentication required");
+  if (isRecordingsAuthorized(req)) {
+    return next();
   }
 
-  return next();
+  if (req.method === "GET" && req.accepts("html")) {
+    const nextPath = req.originalUrl || "/recordings";
+    return res.redirect(`/recordings/login?next=${encodeURIComponent(nextPath)}`);
+  }
+
+  return res.status(401).json({ error: "Authentication required" });
 };
 
-app.use("/recordings", requireRecordingsAuth);
+app.get("/recordings/login", (req, res) => {
+  if (!recordingsViewerPassword) {
+    return res.status(503).send("Recordings viewer password is not configured");
+  }
+  if (isRecordingsAuthorized(req)) {
+    const nextPath = String(req.query.next || "/recordings");
+    return res.redirect(nextPath.startsWith("/recordings") ? nextPath : "/recordings");
+  }
+  const nextPath = String(req.query.next || "/recordings");
+  const hasError = String(req.query.error || "") === "1";
+  return res.status(200).send(renderRecordingsLoginPage({ error: hasError, nextPath }));
+});
+
+app.post(
+  "/recordings/login",
+  express.urlencoded({ extended: false }),
+  (req, res) => {
+    if (!recordingsViewerPassword) {
+      return res.status(503).send("Recordings viewer password is not configured");
+    }
+
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    const nextPath = String(req.body?.next || "/recordings");
+    const safeNext = nextPath.startsWith("/recordings") ? nextPath : "/recordings";
+
+    if (username === recordingsViewerUser && password === recordingsViewerPassword) {
+      setRecordingsSessionCookie(res, req);
+      return res.redirect(safeNext);
+    }
+
+    return res.redirect(
+      `/recordings/login?error=1&next=${encodeURIComponent(safeNext)}`,
+    );
+  },
+);
+
+app.get("/recordings/logout", (req, res) => {
+  clearRecordingsSessionCookie(res);
+  return res.redirect("/recordings/login");
+});
 app.use(
   "/recordings/files",
+  requireRecordingsAuth,
   express.static(recordingsDir, {
     index: false,
   }),
 );
 
-app.get("/recordings", async (_req, res) => {
+app.get("/recordings", requireRecordingsAuth, async (req, res) => {
   try {
     const entries = await fs.readdir(recordingsDir, { withFileTypes: true });
     const videos = (
@@ -254,7 +461,7 @@ app.get("/recordings", async (_req, res) => {
           .join("")
       : "<li>Нет записей</li>";
 
-    const selectedFile = String(_req.query.file || selected);
+    const selectedFile = String(req.query.file || selected);
     const safeSelectedFile = path.basename(selectedFile);
     const playerHtml =
       safeSelectedFile && videos.some((video) => video.name === safeSelectedFile)
@@ -283,6 +490,7 @@ app.get("/recordings", async (_req, res) => {
   </head>
   <body>
     <h1>Записи комнаты</h1>
+    <p style="margin:0 0 16px"><a href="/recordings/logout">Выйти</a></p>
     <div class="grid">
       <section class="panel">
         <h2>Файлы</h2>
