@@ -13,7 +13,7 @@ echo "[1/4] Pull base images"
 docker compose -f docker-compose.prod.yml pull redis livekit egress || true
 
 echo "[2/4] Build app images"
-docker compose -f docker-compose.prod.yml build web server
+docker compose -f docker-compose.prod.yml build web server asr-worker
 
 echo "[3/4] Start or update stack"
 docker compose -f docker-compose.prod.yml up -d --remove-orphans
@@ -22,3 +22,5 @@ echo "[4/4] Status"
 docker compose -f docker-compose.prod.yml ps
 
 echo "Done. Open: http://<server-ip>:${WEB_PORT:-8080}"
+echo "Recordings + transcript: https://<server-ip>:${WEB_HTTPS_PORT:-8443}/recordings"
+echo "Note: first asr-worker start downloads Whisper model (may take several minutes)."

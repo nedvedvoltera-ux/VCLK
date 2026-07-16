@@ -23,6 +23,24 @@ import {
 } from "@livekit/components-react";
 import { Track, type AudioCaptureOptions, type VideoCaptureOptions } from "livekit-client";
 import "@livekit/components-styles";
+import {
+  buildHttpsRequiredMessage,
+  buildInviteLink,
+  buildSignalingProxyUrl,
+  canJoin as canJoinRoom,
+  getMobileLayoutMode,
+  getNetworkQuality,
+  isNonEmptyChatMessage,
+  parseParticipantAvatar,
+  parseRecordingStatusPayload,
+  readJoinQueryParams,
+  resolveSelectedTrack,
+  shouldHideChatName,
+  shouldHideChatTimestamp,
+  sortTracksByScreenSharePriority,
+  tryParseJsonObject,
+  type NetworkQuality,
+} from "./lib/meetingHelpers";
 
 type TokenResponse = {
   token: string;
@@ -32,8 +50,6 @@ type AvatarUploadResponse = {
   avatarUrl: string;
 };
 
-type NetworkQuality = "low" | "medium" | "high" | "unknown";
-
 function MeetParticipantTile({
   trackRef,
   className,
@@ -42,26 +58,16 @@ function MeetParticipantTile({
   className?: string;
 }) {
   const participant = trackRef?.participant;
-  const metadataAvatar = useMemo(() => {
-    const rawMetadata = participant?.metadata;
-    if (!rawMetadata) {
-      return null;
-    }
-    try {
-      const parsed = JSON.parse(rawMetadata) as { avatarDataUrl?: unknown; avatarUrl?: unknown };
-      if (typeof parsed.avatarUrl === "string" && parsed.avatarUrl.length > 0) {
-        return parsed.avatarUrl;
-      }
-      return typeof parsed.avatarDataUrl === "string" ? parsed.avatarDataUrl : null;
-    } catch {
-      return null;
-    }
-  }, [participant?.metadata]);
-  const avatarUrl =
-    metadataAvatar ||
-    (typeof participant?.attributes?.avatarDataUrl === "string"
-      ? participant.attributes.avatarDataUrl
-      : null);
+  const avatarUrl = useMemo(
+    () =>
+      parseParticipantAvatar(
+        participant?.metadata,
+        typeof participant?.attributes?.avatarDataUrl === "string"
+          ? participant.attributes.avatarDataUrl
+          : null,
+      ),
+    [participant?.attributes?.avatarDataUrl, participant?.metadata],
+  );
   const isSpeaking = Boolean(participant?.isSpeaking);
   const participantLabel = participant?.name || participant?.identity || "Участник";
   const hasVideo =
@@ -106,11 +112,11 @@ function MeetChatDrawer({
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const value = inputRef.current?.value?.trim() || "";
-    if (!value) {
+    const value = inputRef.current?.value || "";
+    if (!isNonEmptyChatMessage(value)) {
       return;
     }
-    await send(value);
+    await send(value.trim());
     if (inputRef.current) {
       inputRef.current.value = "";
       inputRef.current.focus();
@@ -128,13 +134,17 @@ function MeetChatDrawer({
         </div>
         <ul className="lk-list lk-chat-messages" ref={messagesRef}>
           {chatMessages.map((msg, idx, allMsg) => {
-            const hideName = idx >= 1 && allMsg[idx - 1].from === msg.from;
-            const hideTimestamp = idx >= 1 && msg.timestamp - allMsg[idx - 1].timestamp < 60_000;
+            const hideName = shouldHideChatName(msg.from, allMsg[idx - 1]?.from, idx);
+            const hideTimestamp = shouldHideChatTimestamp(
+              msg.timestamp,
+              allMsg[idx - 1]?.timestamp ?? 0,
+              hideName,
+            );
             return (
               <ChatEntry
                 key={msg.id ?? idx}
                 hideName={hideName}
-                hideTimestamp={hideName ? hideTimestamp : false}
+                hideTimestamp={hideTimestamp}
                 entry={msg}
               />
             );
@@ -184,6 +194,7 @@ function MeetRoomLayout({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingEgressId, setRecordingEgressId] = useState<string | null>(null);
   const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showParticipants, setShowParticipants] = useState(true);
@@ -200,17 +211,14 @@ function MeetRoomLayout({
   const localIdentity = localParticipant.identity;
   const orderedTracks = useMemo(
     () =>
-      [...tracks].sort((a, b) => {
-        const aPriority = a.source === Track.Source.ScreenShare ? 0 : 1;
-        const bPriority = b.source === Track.Source.ScreenShare ? 0 : 1;
-        return aPriority - bPriority;
-      }),
+      sortTracksByScreenSharePriority(
+        tracks,
+        (trackRef) => trackRef.source === Track.Source.ScreenShare,
+      ),
     [tracks],
   );
   const selectedTrack = useMemo(
-    () =>
-      orderedTracks.find((trackRef) => getTrackReferenceId(trackRef) === selectedTrackId) ??
-      orderedTracks[0],
+    () => resolveSelectedTrack(orderedTracks, selectedTrackId, getTrackReferenceId),
     [orderedTracks, selectedTrackId],
   );
   const activeTrackId = selectedTrack ? getTrackReferenceId(selectedTrack) : null;
@@ -259,16 +267,9 @@ function MeetRoomLayout({
         return;
       }
       const payload = await response.json();
-      const recording = payload?.recording;
-      if (recording?.active) {
-        setIsRecording(true);
-        setRecordingEgressId(
-          typeof recording.egressId === "string" ? recording.egressId : null,
-        );
-      } else {
-        setIsRecording(false);
-        setRecordingEgressId(null);
-      }
+      const recording = parseRecordingStatusPayload(payload);
+      setIsRecording(recording.active);
+      setRecordingEgressId(recording.egressId);
     } catch {
       // ignore status failure silently
     }
@@ -304,12 +305,14 @@ function MeetRoomLayout({
   const onToggleRecording = async () => {
     setRecordingBusy(true);
     setRecordingError(null);
+    setRecordingNotice(null);
+    const stopping = isRecording;
     try {
       const endpoint = new URL(
-        isRecording ? "/recording/stop" : "/recording/start",
+        stopping ? "/recording/stop" : "/recording/start",
         backendUrl,
       );
-      const body = isRecording
+      const body = stopping
         ? { room: roomName, egressId: recordingEgressId }
         : { room: roomName };
       const response = await fetch(endpoint, {
@@ -318,26 +321,29 @@ function MeetRoomLayout({
         body: JSON.stringify(body),
       });
       const rawBody = await response.text();
-      let payload: Record<string, unknown> = {};
-      if (rawBody) {
-        try {
-          payload = JSON.parse(rawBody) as Record<string, unknown>;
-        } catch {
-          throw new Error(
-            `Сервер записи вернул не-JSON ответ (HTTP ${response.status}). Проверьте /recording endpoint.`,
-          );
-        }
+      const payload = tryParseJsonObject(rawBody);
+      if (payload === null) {
+        throw new Error(
+          stopping
+            ? "Не удалось остановить запись: сервер вернул некорректный ответ."
+            : "Не удалось начать запись: сервер вернул некорректный ответ.",
+        );
       }
       if (!response.ok) {
         const message =
           typeof payload.error === "string"
             ? payload.error
-            : `Операция записи не выполнена (HTTP ${response.status})`;
+            : stopping
+              ? "Не удалось остановить запись."
+              : "Не удалось начать запись.";
         throw new Error(message);
       }
-      if (isRecording) {
+      if (stopping) {
         setIsRecording(false);
         setRecordingEgressId(null);
+        if (typeof payload.warning === "string" && payload.warning) {
+          setRecordingNotice(payload.warning);
+        }
       } else {
         setIsRecording(true);
         setRecordingEgressId(
@@ -350,8 +356,11 @@ function MeetRoomLayout({
       setRecordingError(
         error instanceof Error
           ? error.message
-          : "Ошибка при работе с записью. Проверьте backend/egress.",
+          : stopping
+            ? "Не удалось остановить запись."
+            : "Не удалось начать запись.",
       );
+      setSettingsOpen(false);
     } finally {
       setRecordingBusy(false);
     }
@@ -428,8 +437,6 @@ function MeetRoomLayout({
             </button>
           </div>
         </header>
-        {recordingError ? <p className="meet-record-error">{recordingError}</p> : null}
-
         <section className="meet-stage">
           <MeetChatDrawer isOpen={isChatOpen} onClose={onToggleChat} />
           <aside className={`meet-participants-drawer ${showParticipants ? "is-open" : ""}`}>
@@ -447,7 +454,7 @@ function MeetRoomLayout({
           </aside>
           <div className="meet-main-stage">
             {isMobileViewport ? (
-              orderedTracks.length <= 1 ? (
+              getMobileLayoutMode(orderedTracks.length) === "single" ? (
                 <div className="meet-mobile-single">
                   {mobilePrimaryTrack ? (
                     <MeetParticipantTile trackRef={mobilePrimaryTrack} className="meet-main-tile" />
@@ -455,7 +462,7 @@ function MeetRoomLayout({
                     <div className="meet-empty-tile">Ожидание видео...</div>
                   )}
                 </div>
-              ) : orderedTracks.length === 2 ? (
+              ) : getMobileLayoutMode(orderedTracks.length) === "two" ? (
                 <div className="meet-mobile-two-layout">
                   {mobilePrimaryTrack ? (
                     <MeetParticipantTile trackRef={mobilePrimaryTrack} className="meet-main-tile" />
@@ -588,20 +595,55 @@ function MeetRoomLayout({
 
         <RoomAudioRenderer />
         <ConnectionStateToast />
+
+        {recordingError || recordingNotice ? (
+          <div
+            className="meet-modal-backdrop"
+            role="presentation"
+            onClick={() => {
+              setRecordingError(null);
+              setRecordingNotice(null);
+            }}
+          >
+            <div
+              className={`meet-modal ${recordingError ? "meet-modal--error" : "meet-modal--info"}`}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="recording-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="meet-modal-icon" aria-hidden="true">
+                {recordingError ? "!" : "i"}
+              </div>
+              <div className="meet-modal-body">
+                <h3 id="recording-modal-title">
+                  {recordingError ? "Ошибка записи" : "Запись"}
+                </h3>
+                <p>{recordingError || recordingNotice}</p>
+              </div>
+              <button
+                type="button"
+                className="meet-modal-close"
+                onClick={() => {
+                  setRecordingError(null);
+                  setRecordingNotice(null);
+                }}
+              >
+                Понятно
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
     </LayoutContextProvider>
   );
 }
 
 function App() {
-  const [room, setRoom] = useState(() => {
-    const queryRoom = new URLSearchParams(window.location.search).get("room");
-    return queryRoom?.trim() || "demo-room";
-  });
-  const [username, setUsername] = useState(() => {
-    const queryUser = new URLSearchParams(window.location.search).get("name");
-    return queryUser?.trim() || "";
-  });
+  const [room, setRoom] = useState(() => readJoinQueryParams(window.location.search).room);
+  const [username, setUsername] = useState(
+    () => readJoinQueryParams(window.location.search).username,
+  );
   const [backendUrl, setBackendUrl] = useState(window.location.origin);
   const [token, setToken] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState("");
@@ -617,20 +659,16 @@ function App() {
   const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
   const [estimatedBandwidthMbps, setEstimatedBandwidthMbps] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const signalingProxyUrl = useMemo(() => {
-    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-    return `${wsProtocol}://${window.location.host}/livekit`;
-  }, []);
-
-  const canJoin = useMemo(
-    () => room.trim().length > 0 && username.trim().length > 0,
-    [room, username],
+  const signalingProxyUrl = useMemo(
+    () => buildSignalingProxyUrl(window.location.protocol, window.location.host),
+    [],
   );
-  const inviteLink = useMemo(() => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("room", room.trim() || "demo-room");
-    return url.toString();
-  }, [room]);
+
+  const canJoin = useMemo(() => canJoinRoom(room, username), [room, username]);
+  const inviteLink = useMemo(
+    () => buildInviteLink(window.location.href, room),
+    [room],
+  );
   const audioCaptureOptions: true | AudioCaptureOptions = useMemo(() => {
     if (!selectedAudioDeviceId) {
       return true;
@@ -648,10 +686,7 @@ function App() {
     const mediaDevices = navigator.mediaDevices;
     if (!mediaDevices || !window.isSecureContext) {
       const httpsPort = window.location.protocol === "https:" ? window.location.port : "8443";
-      const portSuffix = httpsPort ? `:${httpsPort}` : "";
-      setPreviewError(
-        `Для камеры и микрофона нужен HTTPS: https://${window.location.hostname}${portSuffix}/ — подтвердите сертификат в браузере.`,
-      );
+      setPreviewError(buildHttpsRequiredMessage(window.location.hostname, httpsPort || undefined));
       return;
     }
 
@@ -787,18 +822,10 @@ function App() {
     };
   }, []);
 
-  const networkQuality = useMemo<NetworkQuality>(() => {
-    if (estimatedBandwidthMbps === null) {
-      return "unknown";
-    }
-    if (estimatedBandwidthMbps < 5) {
-      return "low";
-    }
-    if (estimatedBandwidthMbps <= 15) {
-      return "medium";
-    }
-    return "high";
-  }, [estimatedBandwidthMbps]);
+  const networkQuality = useMemo<NetworkQuality>(
+    () => getNetworkQuality(estimatedBandwidthMbps),
+    [estimatedBandwidthMbps],
+  );
 
   useEffect(() => {
     if (!previewStream) {

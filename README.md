@@ -74,7 +74,27 @@ npm run dev
 При заходе с другого устройства используйте `https://<IP-адрес-хоста>:5173` и подтвердите self-signed сертификат в браузере.
 Через Vite-прокси запросы `/token` и LiveKit signaling (`/livekit`) идут в локальные сервисы без mixed-content ошибок.
 
-## 5) Проверка нескольких клиентов
+## 5) Unit-тесты и чеклист функций
+
+Перед доработкой и перед push на GitHub:
+
+```bash
+# из корня репозитория
+npm --prefix server install
+npm --prefix web install
+npm test                 # unit-тесты server + web
+npm run test:release     # тесты + production build web (перед релизом / push)
+npm run lint             # ESLint web (отдельно)
+```
+
+Документы:
+
+- `FEATURE_CHECKLIST.md` — полный список пользовательских функций UI и покрытие тестами
+- `GLOSSARY.md` — термины экранов/сущностей (пополнять вместе с новыми функциями)
+
+Правило: новая кнопка/API → строка в чеклисте + термин в глоссарии + unit-тест на чистую логику.
+
+## 6) Проверка нескольких клиентов
 
 Откройте UI на двух устройствах/вкладках:
 
@@ -83,7 +103,7 @@ npm run dev
 
 После подключения клиенты должны видеть и слышать друг друга.
 
-## 6) Запись (LiveKit Egress)
+## 7) Запись (LiveKit Egress)
 
 В интерфейсе комнаты есть кнопка `Начать запись / Остановить запись`.
 
@@ -140,19 +160,97 @@ UI будет доступен по:
 
 - `http://<IP_сервера>:8080` (или другой порт из `WEB_PORT` в `.env`)
 
+### Транскрибация и саммари
+
+В prod-стеке есть сервис `asr-worker` (faster-whisper на CPU) и очередь Redis.
+
+- После **Остановить запись** задача ставится в очередь автоматически.
+- В архиве `/recordings` у файла: статус, кнопки **Транскрипт** / **Запустить**.
+- Модалка: вкладки **Транскрипт** и **Саммари**.
+- Саммари считается на сетевой Qwen (не на ВКС):
+
+```bash
+SUMMARY_API_BASE_URL=http://192.168.215.74:9080/v1
+SUMMARY_MODEL=Qwen/Qwen3.5-35B-A3B-FP8
+```
+
+Артефакты рядом с mp4: `*.transcript.json`, `*.transcript.txt`.
+
+Первый запуск `asr-worker` скачивает модель Whisper (`small`) — это может занять несколько минут. На CPU одновременно обрабатывается **1** задача.
+
+Переход на GPU позже: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (и при необходимости модель крупнее + диаризация).
+
 ### Как собирать Docker руками (без скрипта)
 
 ```bash
-docker compose -f docker-compose.prod.yml build web server
+docker compose -f docker-compose.prod.yml build web server asr-worker
 docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
-docker compose -f docker-compose.prod.yml logs -f --tail=200
+docker compose -f docker-compose.prod.yml logs -f asr-worker --tail=200
 ```
 
 ### Как накатывать обновления
 
 ```bash
 git pull
+./deploy.sh
+```
+
+### Домен и TLS (например `vclk.asntl.ru`)
+
+Есть два типичных варианта.
+
+**Вариант A — сертификат на корпоративном reverse proxy (у вас сейчас так):**
+
+- `https://vclk.asntl.ru` → балансировщик (nginx) → `https://192.168.215.44:8443`
+- Сертификат **не обязательно** класть на ВКС — он уже на прокси.
+- Записи: `https://vclk.asntl.ru/recordings` (логин/пароль из `server/.env`).
+
+На прокси **обязательно** пробросить WebSocket для LiveKit:
+
+```nginx
+location /livekit/ {
+    proxy_pass https://192.168.215.44:8443/livekit/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 86400;
+}
+
+location / {
+    proxy_pass https://192.168.215.44:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Если после ввода имени снова показывается экран входа — чаще всего не хватает WebSocket на прокси **или** UDP для WebRTC (`50000-50100/udp`, `7882/tcp`) до `192.168.215.44`.
+
+**Вариант B — сертификат прямо на ВКС:**
+
+```bash
+mkdir -p certs
+# скопируйте файлы от админов (имена важны):
+# certs/fullchain.pem
+# certs/privkey.pem
+```
+
+В `.env`:
+
+```bash
+PUBLIC_HOSTNAME=vclk.asntl.ru
+TLS_CERT_DIR=./certs
+TLS_IP=192.168.215.44
+```
+
+Пересоберите web:
+
+```bash
 ./deploy.sh
 ```
 

@@ -456,6 +456,86 @@ summary {
   font-size: 12px;
 }
 
+.meet-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(6, 10, 20, 0.62);
+  backdrop-filter: blur(4px);
+}
+
+.meet-modal {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 20px 20px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, #152238 0%, #101a2d 100%);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  color: #e8eefc;
+}
+
+.meet-modal--error {
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.meet-modal--info {
+  border-color: rgba(96, 165, 250, 0.35);
+}
+
+.meet-modal-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.meet-modal--error .meet-modal-icon {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.55);
+}
+
+.meet-modal--info .meet-modal-icon {
+  color: #bfdbfe;
+  background: rgba(30, 64, 175, 0.55);
+}
+
+.meet-modal-body h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.meet-modal-body p {
+  margin: 0;
+  color: #c7d2e5;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.meet-modal-close {
+  justify-self: end;
+  border: none;
+  border-radius: 999px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #eff6ff;
+  background: #2563eb;
+}
+
+.meet-modal-close:hover {
+  background: #1d4ed8;
+}
+
 .meet-stage {
   position: relative;
   min-height: 0;

@@ -6,6 +6,28 @@ const crypto = require("node:crypto");
 const express = require("express");
 const cors = require("cors");
 const { AccessToken, EgressClient } = require("livekit-server-sdk");
+const {
+  sanitizeAvatarUrl,
+  parseAvatarDataUrl,
+  getAvatarExtension,
+  toSafeSlug,
+  parseBasicAuth,
+  parseCookies,
+  getEgressTroubleshootingHint,
+  isEgressNotFoundError,
+  createRecordingsSessionToken: createSessionToken,
+  verifyRecordingsSessionToken: verifySessionToken,
+  isSafeRecordingsNextPath,
+} = require("./lib/helpers");
+const {
+  sanitizeRecordingFileName,
+  transcriptArtifactName,
+  buildTranscriptionJob,
+  mapTranscriptStatusLabel,
+  mapTranscriptProgress,
+  createMissingTranscriptPayload,
+} = require("./lib/transcription");
+const { escapeHtml, renderRecordingsArchivePage } = require("./lib/recordingsPage");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -33,17 +55,98 @@ const recordingsSessionSecret =
 const egressClient = new EgressClient(livekitHttpUrl, apiKey, apiSecret);
 const recordingByRoom = new Map();
 const avatarById = new Map();
-const getEgressTroubleshootingHint = (error) => {
-  const message = String(error?.message || "").toLowerCase();
-  const code = String(error?.code || "").toLowerCase();
+const transcriptionEnabled =
+  String(process.env.TRANSCRIPTION_ENABLED || "true").toLowerCase() !== "false";
+const redisUrl = process.env.REDIS_URL || "redis://redis:6379/0";
+const asrQueueKey = process.env.ASR_QUEUE_KEY || "transcription:jobs";
+let redisClient = null;
 
-  if (message.includes("egress not connected") || message.includes("redis required")) {
-    return "Egress не подключен к LiveKit. Запустите Redis и Egress, затем перезапустите LiveKit.";
+const getRedisClient = async () => {
+  if (!transcriptionEnabled) {
+    return null;
   }
-  if (message.includes("no response from servers") || code === "unavailable") {
-    return "Сервис Egress недоступен. Проверьте, что контейнер egress запущен и подключен к Redis.";
+  if (redisClient?.isOpen) {
+    return redisClient;
   }
-  return "Проверьте LiveKit API URL, ключи и состояние сервисов LiveKit/Redis/Egress.";
+  const { createClient } = require("redis");
+  redisClient = createClient({ url: redisUrl });
+  redisClient.on("error", (error) => {
+    console.error("Redis error:", error?.message || error);
+  });
+  await redisClient.connect();
+  return redisClient;
+};
+
+const readTranscriptArtifact = async (fileName) => {
+  const safe = sanitizeRecordingFileName(fileName);
+  if (!safe) {
+    return createMissingTranscriptPayload(fileName);
+  }
+  const artifactFile = transcriptArtifactName(safe);
+  const fullPath = path.join(recordingsDir, artifactFile);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return { ...parsed, fileName: safe };
+  } catch {
+    return createMissingTranscriptPayload(safe);
+  }
+};
+
+const enqueueTranscription = async (fileName, mode = "full") => {
+  const job = buildTranscriptionJob({ fileName, mode });
+  if (!job) {
+    return { ok: false, error: "Invalid recording file name" };
+  }
+  if (!transcriptionEnabled) {
+    return { ok: false, error: "Transcription is disabled" };
+  }
+
+  const artifactPath = path.join(recordingsDir, transcriptArtifactName(job.fileName));
+  const queuedPayload = {
+    version: 1,
+    status: "queued",
+    fileName: job.fileName,
+    engine: "faster-whisper",
+    error: null,
+    progress: 12,
+    progressIndeterminate: true,
+    segments: [],
+    text: "",
+    summary: { status: "pending", text: "", error: null },
+    diarization: { enabled: false },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  if (mode === "summarize_only") {
+    const existing = await readTranscriptArtifact(job.fileName);
+    queuedPayload.text = existing.text || "";
+    queuedPayload.segments = existing.segments || [];
+    queuedPayload.status = "summarizing";
+    queuedPayload.progress = 85;
+  }
+  await fs.writeFile(artifactPath, JSON.stringify(queuedPayload, null, 2), "utf8");
+
+  try {
+    const client = await getRedisClient();
+    if (!client) {
+      return { ok: false, error: "Redis is not available" };
+    }
+    await client.rPush(asrQueueKey, JSON.stringify(job));
+    return { ok: true, job };
+  } catch (error) {
+    queuedPayload.status = "error";
+    queuedPayload.error = String(error?.message || error);
+    await fs.writeFile(artifactPath, JSON.stringify(queuedPayload, null, 2), "utf8");
+    return { ok: false, error: queuedPayload.error };
+  }
+};
+
+const fileNameFromRecordingPath = (filePath) => {
+  if (!filePath) {
+    return "";
+  }
+  return sanitizeRecordingFileName(path.basename(String(filePath)));
 };
 
 app.use(cors());
@@ -74,39 +177,6 @@ const buildToken = async ({ roomName, username, avatarUrl }) => {
   });
 
   return token.toJwt();
-};
-
-const sanitizeAvatarUrl = (value) => {
-  const avatarUrl = String(value || "").trim();
-  if (!avatarUrl.startsWith("/avatar/")) {
-    return "";
-  }
-  return avatarUrl;
-};
-
-const parseAvatarDataUrl = (imageDataUrl) => {
-  const value = String(imageDataUrl || "").trim();
-  const match = value.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
-  if (!match) {
-    return null;
-  }
-  const mimeType = match[1];
-  const base64Payload = match[2];
-  const buffer = Buffer.from(base64Payload, "base64");
-  if (buffer.length === 0 || buffer.length > 256 * 1024) {
-    return null;
-  }
-  return { mimeType, buffer };
-};
-
-const getAvatarExtension = (mimeType) => {
-  if (mimeType === "image/png") {
-    return "png";
-  }
-  if (mimeType === "image/webp") {
-    return "webp";
-  }
-  return "jpg";
 };
 
 app.post("/avatar", (req, res) => {
@@ -176,77 +246,18 @@ app.post("/token", async (req, res) => {
   });
 });
 
-const toSafeSlug = (value) =>
-  value
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "room";
+const createRecordingsSessionToken = () =>
+  createSessionToken({
+    user: recordingsViewerUser,
+    secret: recordingsSessionSecret,
+    ttlMs: recordingsSessionTtlMs,
+  });
 
-const parseBasicAuth = (headerValue) => {
-  if (!headerValue || !headerValue.startsWith("Basic ")) {
-    return null;
-  }
-  const base64Part = headerValue.slice("Basic ".length).trim();
-  try {
-    const decoded = Buffer.from(base64Part, "base64").toString("utf8");
-    const splitIndex = decoded.indexOf(":");
-    if (splitIndex < 0) {
-      return null;
-    }
-    return {
-      username: decoded.slice(0, splitIndex),
-      password: decoded.slice(splitIndex + 1),
-    };
-  } catch {
-    return null;
-  }
-};
-
-const parseCookies = (headerValue) => {
-  const cookies = {};
-  if (!headerValue) {
-    return cookies;
-  }
-  for (const part of headerValue.split(";")) {
-    const [rawKey, ...rawValue] = part.trim().split("=");
-    if (!rawKey) {
-      continue;
-    }
-    cookies[rawKey] = decodeURIComponent(rawValue.join("=") || "");
-  }
-  return cookies;
-};
-
-const signRecordingsSession = (expiresAt) => {
-  const payload = `${recordingsViewerUser}:${expiresAt}`;
-  return crypto.createHmac("sha256", recordingsSessionSecret).update(payload).digest("hex");
-};
-
-const createRecordingsSessionToken = () => {
-  const expiresAt = Date.now() + recordingsSessionTtlMs;
-  return `${expiresAt}.${signRecordingsSession(expiresAt)}`;
-};
-
-const verifyRecordingsSessionToken = (token) => {
-  if (!token) {
-    return false;
-  }
-  const separatorIndex = token.indexOf(".");
-  if (separatorIndex < 0) {
-    return false;
-  }
-  const expiresAt = Number(token.slice(0, separatorIndex));
-  const signature = token.slice(separatorIndex + 1);
-  if (!Number.isFinite(expiresAt) || expiresAt < Date.now() || !signature) {
-    return false;
-  }
-  const expected = signRecordingsSession(expiresAt);
-  if (signature.length !== expected.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-};
+const verifyRecordingsSessionToken = (token) =>
+  verifySessionToken(token, {
+    user: recordingsViewerUser,
+    secret: recordingsSessionSecret,
+  });
 
 const isRecordingsAuthorized = (req) => {
   if (!recordingsViewerPassword) {
@@ -285,7 +296,7 @@ const clearRecordingsSessionCookie = (res) => {
 };
 
 const renderRecordingsLoginPage = ({ error = false, nextPath = "/recordings" } = {}) => {
-  const safeNext = nextPath.startsWith("/recordings") ? nextPath : "/recordings";
+  const safeNext = isSafeRecordingsNextPath(nextPath) ? nextPath : "/recordings";
   const errorHtml = error
     ? '<p class="error">Неверный логин или пароль. Попробуйте снова.</p>'
     : "";
@@ -389,7 +400,7 @@ app.get("/recordings/login", (req, res) => {
   }
   if (isRecordingsAuthorized(req)) {
     const nextPath = String(req.query.next || "/recordings");
-    return res.redirect(nextPath.startsWith("/recordings") ? nextPath : "/recordings");
+    return res.redirect(isSafeRecordingsNextPath(nextPath) ? nextPath : "/recordings");
   }
   const nextPath = String(req.query.next || "/recordings");
   const hasError = String(req.query.error || "") === "1";
@@ -407,7 +418,7 @@ app.post(
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
     const nextPath = String(req.body?.next || "/recordings");
-    const safeNext = nextPath.startsWith("/recordings") ? nextPath : "/recordings";
+    const safeNext = isSafeRecordingsNextPath(nextPath) ? nextPath : "/recordings";
 
     if (username === recordingsViewerUser && password === recordingsViewerPassword) {
       setRecordingsSessionCookie(res, req);
@@ -432,6 +443,49 @@ app.use(
   }),
 );
 
+app.get("/recordings/:file/transcript", requireRecordingsAuth, async (req, res) => {
+  const safe = sanitizeRecordingFileName(req.params.file);
+  if (!safe) {
+    return res.status(400).json({ error: "Invalid file name" });
+  }
+  const artifact = await readTranscriptArtifact(safe);
+  return res.json({
+    ok: true,
+    fileName: safe,
+    label: mapTranscriptStatusLabel(artifact),
+    progress: mapTranscriptProgress(artifact),
+    transcript: artifact,
+  });
+});
+
+app.post("/recordings/:file/transcribe", requireRecordingsAuth, async (req, res) => {
+  const safe = sanitizeRecordingFileName(req.params.file);
+  if (!safe) {
+    return res.status(400).json({ error: "Invalid file name" });
+  }
+  const result = await enqueueTranscription(safe, "full");
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || "Failed to enqueue" });
+  }
+  return res.json({ ok: true, job: result.job });
+});
+
+app.post("/recordings/:file/summarize", requireRecordingsAuth, async (req, res) => {
+  const safe = sanitizeRecordingFileName(req.params.file);
+  if (!safe) {
+    return res.status(400).json({ error: "Invalid file name" });
+  }
+  const existing = await readTranscriptArtifact(safe);
+  if (!existing.text) {
+    return res.status(400).json({ error: "Transcript text is not ready yet" });
+  }
+  const result = await enqueueTranscription(safe, "summarize_only");
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || "Failed to enqueue summary" });
+  }
+  return res.json({ ok: true, job: result.job });
+});
+
 app.get("/recordings", requireRecordingsAuth, async (req, res) => {
   try {
     const entries = await fs.readdir(recordingsDir, { withFileTypes: true });
@@ -442,10 +496,15 @@ app.get("/recordings", requireRecordingsAuth, async (req, res) => {
           .map(async (entry) => {
             const fullPath = path.join(recordingsDir, entry.name);
             const stats = await fs.stat(fullPath);
+            const transcript = await readTranscriptArtifact(entry.name);
+            const progress = mapTranscriptProgress(transcript);
             return {
               name: entry.name,
               mtimeMs: stats.mtimeMs,
               sizeMb: (stats.size / 1024 / 1024).toFixed(2),
+              transcriptStatus: transcript.status || "missing",
+              transcriptLabel: mapTranscriptStatusLabel(transcript),
+              progress,
             };
           }),
       )
@@ -454,55 +513,70 @@ app.get("/recordings", requireRecordingsAuth, async (req, res) => {
     const selected = videos[0]?.name || "";
     const listHtml = videos.length
       ? videos
-          .map(
-            (video) =>
-              `<li><a href="/recordings?file=${encodeURIComponent(video.name)}">${video.name}</a> (${video.sizeMb} MB)</li>`,
-          )
+          .map((video) => {
+            const canOpen =
+              video.transcriptStatus === "done" ||
+              video.transcriptStatus === "transcribing" ||
+              video.transcriptStatus === "summarizing" ||
+              video.transcriptStatus === "queued" ||
+              video.transcriptStatus === "error";
+            const showStart =
+              video.transcriptStatus === "missing" || video.transcriptStatus === "error";
+            const busy =
+              video.transcriptStatus === "queued" ||
+              video.transcriptStatus === "transcribing" ||
+              video.transcriptStatus === "summarizing";
+            const chipClass =
+              video.transcriptStatus === "done"
+                ? "ok"
+                : video.transcriptStatus === "error"
+                  ? "err"
+                  : busy
+                    ? "busy"
+                    : "";
+            const progressVisible =
+              busy || video.transcriptStatus === "error" ? "block" : "none";
+            const progressWidth = Math.max(8, video.progress?.percent || 0);
+            const indeterminateClass =
+              video.progress?.indeterminate && busy ? "is-indeterminate" : "";
+            return `<li class="rec-item${req.query.file === video.name ? " is-active" : ""}" data-file="${encodeURIComponent(video.name)}" data-busy="${busy ? "1" : "0"}">
+              <div class="rec-main">
+                <a href="/recordings?file=${encodeURIComponent(video.name)}">${escapeHtml(video.name)}</a>
+                <div class="rec-meta">
+                  <span class="chip">${video.sizeMb} MB</span>
+                  <span class="chip ${chipClass}" data-status-for="${encodeURIComponent(video.name)}">${escapeHtml(video.transcriptLabel)}</span>
+                </div>
+                <div class="progress ${indeterminateClass}" data-progress-for="${encodeURIComponent(video.name)}" style="display:${progressVisible}">
+                  <i style="width:${progressWidth}%"></i>
+                </div>
+              </div>
+              <div class="rec-actions">
+                <button type="button" class="btn-secondary" data-open-transcript="${encodeURIComponent(video.name)}" ${canOpen ? "" : "disabled"}>Транскрипт</button>
+                ${
+                  showStart
+                    ? `<button type="button" class="btn" data-start-transcript="${encodeURIComponent(video.name)}">Запустить</button>`
+                    : ""
+                }
+              </div>
+            </li>`;
+          })
           .join("")
-      : "<li>Нет записей</li>";
+      : '<li class="empty">Нет записей</li>';
 
     const selectedFile = String(req.query.file || selected);
     const safeSelectedFile = path.basename(selectedFile);
     const playerHtml =
       safeSelectedFile && videos.some((video) => video.name === safeSelectedFile)
-        ? `<video controls style="width:100%;max-height:70vh;background:#000" src="/recordings/files/${encodeURIComponent(safeSelectedFile)}"></video>`
-        : "<p>Выберите запись из списка.</p>";
+        ? `<div class="player-shell"><video controls src="/recordings/files/${encodeURIComponent(safeSelectedFile)}"></video></div>`
+        : '<p class="empty">Выберите запись из списка.</p>';
 
-    return res
-      .status(200)
-      .send(`<!doctype html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LiveKit recordings</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }
-      h1 { margin-top: 0; }
-      .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
-      .panel { border: 1px solid #d1d5db; border-radius: 10px; padding: 12px; }
-      ul { padding-left: 18px; margin: 0; }
-      li { margin: 6px 0; word-break: break-all; }
-      a { color: #2563eb; text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-    </style>
-  </head>
-  <body>
-    <h1>Записи комнаты</h1>
-    <p style="margin:0 0 16px"><a href="/recordings/logout">Выйти</a></p>
-    <div class="grid">
-      <section class="panel">
-        <h2>Файлы</h2>
-        <ul>${listHtml}</ul>
-      </section>
-      <section class="panel">
-        <h2>Просмотр</h2>
-        ${playerHtml}
-      </section>
-    </div>
-  </body>
-</html>`);
+    return res.status(200).send(
+      renderRecordingsArchivePage({
+        listHtml,
+        playerHtml,
+        selectedFileName: safeSelectedFile,
+      }),
+    );
   } catch (error) {
     console.error("Failed to render recordings page:", error);
     return res.status(500).send("Не удалось открыть страницу записей");
@@ -563,6 +637,7 @@ app.post("/recording/stop", async (req, res) => {
   const egressIdFromBody = String(req.body?.egressId || "").trim();
   const active = roomName ? recordingByRoom.get(roomName) : null;
   const egressId = egressIdFromBody || active?.egressId;
+  const knownFileName = fileNameFromRecordingPath(active?.filePath);
 
   if (!egressId) {
     return res.status(400).json({
@@ -570,8 +645,7 @@ app.post("/recording/stop", async (req, res) => {
     });
   }
 
-  try {
-    const result = await egressClient.stopEgress(egressId);
+  const clearLocalRecordingState = () => {
     if (roomName) {
       recordingByRoom.delete(roomName);
     } else {
@@ -582,15 +656,46 @@ app.post("/recording/stop", async (req, res) => {
         }
       }
     }
+  };
+
+  try {
+    const result = await egressClient.stopEgress(egressId);
+    clearLocalRecordingState();
+
+    let transcription = null;
+    if (knownFileName) {
+      // Egress may still finalize the mp4; worker retries/errors if missing.
+      setTimeout(() => {
+        void enqueueTranscription(knownFileName, "full");
+      }, 2500);
+      transcription = { queued: true, fileName: knownFileName };
+    }
 
     return res.json({
       ok: true,
       egressId,
       status: result.status,
+      transcription,
     });
   } catch (error) {
+    // Egress often dies on its own (Chrome timeout / OOM). Treat as already stopped.
+    if (isEgressNotFoundError(error)) {
+      clearLocalRecordingState();
+      return res.json({
+        ok: true,
+        egressId,
+        status: "EGRESS_COMPLETE",
+        alreadyStopped: true,
+        warning:
+          "Запись уже была остановлена сервисом (часто из‑за нехватки RAM или сбоя Chrome).",
+      });
+    }
     console.error("Failed to stop recording:", error);
-    return res.status(500).json({ error: "Не удалось остановить запись" });
+    const hint = getEgressTroubleshootingHint(error);
+    return res.status(500).json({
+      error: `Не удалось остановить запись. ${hint}`,
+      details: String(error?.message || "unknown error"),
+    });
   }
 });
 

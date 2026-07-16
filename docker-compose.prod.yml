@@ -42,11 +42,39 @@ services:
       LIVEKIT_URL: ws://livekit:7888
       LIVEKIT_HTTP_URL: http://livekit:7888
       RECORDING_OUTPUT_PREFIX: /out
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      ASR_QUEUE_KEY: ${ASR_QUEUE_KEY:-transcription:jobs}
+      TRANSCRIPTION_ENABLED: ${TRANSCRIPTION_ENABLED:-true}
     volumes:
       - ${RECORDINGS_HOST_PATH:-./recordings}:/out
     depends_on:
       - livekit
       - egress
+      - redis
+
+  asr-worker:
+    build:
+      context: ./asr
+    restart: unless-stopped
+    environment:
+      RECORDINGS_DIR: /out
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      ASR_QUEUE_KEY: ${ASR_QUEUE_KEY:-transcription:jobs}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-ru}
+      SUMMARY_ENABLED: ${SUMMARY_ENABLED:-true}
+      SUMMARY_API_BASE_URL: ${SUMMARY_API_BASE_URL:-http://192.168.215.74:9080/v1}
+      SUMMARY_API_KEY: ${SUMMARY_API_KEY:-}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}
+      SUMMARY_TIMEOUT_SEC: ${SUMMARY_TIMEOUT_SEC:-180}
+      SUMMARY_MAX_TOKENS: ${SUMMARY_MAX_TOKENS:-512}
+      SUMMARY_TEMPERATURE: ${SUMMARY_TEMPERATURE:-0.0}
+    volumes:
+      - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+    depends_on:
+      - redis
 
   web:
     build:
@@ -54,7 +82,10 @@ services:
     restart: unless-stopped
     environment:
       TLS_IP: ${TLS_IP:-}
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-_}
       HTTPS_PUBLIC_PORT: ${WEB_HTTPS_PORT:-8443}
+    volumes:
+      - ${TLS_CERT_DIR:-./certs}:/etc/nginx/certs/custom:ro
     depends_on:
       - server
       - livekit

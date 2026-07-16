@@ -1,0 +1,14 @@
+{
+  "name": "livekitproj",
+  "private": true,
+  "version": "1.0.0",
+  "description": "LiveKit VKS monorepo scripts",
+  "scripts": {
+    "test": "npm run test:server && npm run test:web",
+    "test:server": "npm --prefix server test",
+    "test:web": "npm --prefix web test",
+    "test:release": "npm test && npm --prefix web run build",
+    "lint": "npm --prefix web run lint",
+    "prepush": "npm run test:release"
+  }
+}

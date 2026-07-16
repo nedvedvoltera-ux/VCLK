@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "node --watch index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "livekit",
@@ -19,6 +21,10 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "livekit-server-sdk": "^2.15.4"
+    "livekit-server-sdk": "^2.15.4",
+    "redis": "^4.7.1"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
   }
 }
