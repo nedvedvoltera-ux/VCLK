@@ -9,6 +9,7 @@ import {
   isNonEmptyChatMessage,
   parseParticipantAvatar,
   parseRecordingStatusPayload,
+  shouldAutoStartRecording,
   readJoinQueryParams,
   resolveNextSelectedTrackId,
   resolveSelectedTrack,
@@ -146,5 +147,40 @@ describe("recording response parsing", () => {
     expect(tryParseJsonObject('{"ok":true}')).toEqual({ ok: true });
     expect(tryParseJsonObject("")).toEqual({});
     expect(tryParseJsonObject("<html>")).toBeNull();
+  });
+
+  it("auto-starts recording only with flag and two participants", () => {
+    expect(
+      shouldAutoStartRecording({
+        recordingEnabled: true,
+        participantCount: 2,
+        alreadyRecording: false,
+        alreadyAttempted: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoStartRecording({
+        recordingEnabled: true,
+        participantCount: 1,
+        alreadyRecording: false,
+        alreadyAttempted: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoStartRecording({
+        recordingEnabled: false,
+        participantCount: 2,
+        alreadyRecording: false,
+        alreadyAttempted: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoStartRecording({
+        recordingEnabled: true,
+        participantCount: 2,
+        alreadyRecording: true,
+        alreadyAttempted: false,
+      }),
+    ).toBe(false);
   });
 });

@@ -151,6 +151,20 @@ export const parseRecordingStatusPayload = (
   return { active: false, egressId: null };
 };
 
+/** Auto-start egress when meeting opted in and at least two people are present. */
+export const shouldAutoStartRecording = ({
+  recordingEnabled,
+  participantCount,
+  alreadyRecording,
+  alreadyAttempted,
+}: {
+  recordingEnabled: boolean;
+  participantCount: number;
+  alreadyRecording: boolean;
+  alreadyAttempted: boolean;
+}): boolean =>
+  recordingEnabled && participantCount >= 2 && !alreadyRecording && !alreadyAttempted;
+
 export const tryParseJsonObject = (rawBody: string): Record<string, unknown> | null => {
   if (!rawBody) {
     return {};

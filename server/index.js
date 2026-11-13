@@ -28,6 +28,7 @@ const {
   createMissingTranscriptPayload,
 } = require("./lib/transcription");
 const { escapeHtml, renderRecordingsArchivePage } = require("./lib/recordingsPage");
+const { mountPlatform } = require("./lib/platform");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -179,6 +180,8 @@ const buildToken = async ({ roomName, username, avatarUrl }) => {
   return token.toJwt();
 };
 
+const platform = mountPlatform(app, { buildToken, livekitUrl });
+
 app.post("/avatar", (req, res) => {
   const parsed = parseAvatarDataUrl(req.body?.imageDataUrl);
   if (!parsed) {
@@ -228,23 +231,23 @@ const handleTokenRequest = async ({ roomName, username, avatarUrl, res }) => {
   }
 };
 
-app.get("/token", async (req, res) => {
-  await handleTokenRequest({
-    roomName: String(req.query.room || "").trim(),
-    username: String(req.query.username || "").trim(),
-    avatarUrl: req.query.avatarUrl,
-    res,
-  });
-});
-
 app.post("/token", async (req, res) => {
-  await handleTokenRequest({
-    roomName: String(req.body?.room || "").trim(),
-    username: String(req.body?.username || "").trim(),
-    avatarUrl: req.body?.avatarUrl,
-    res,
-  });
+  const modes = await platform.getSystemModes();
+  if (!modes.freeMode) {
+    return res.status(410).json({
+      error: "Свободный режим отключён. Подключайтесь через запланированную встречу или попросите администратора включить свободный режим.",
+    });
+  }
+  const roomName = String(req.body?.room || req.query?.room || "").trim();
+  const username = String(req.body?.username || req.query?.username || "").trim();
+  const avatarUrl = req.body?.avatarUrl || req.query?.avatarUrl;
+  return handleTokenRequest({ roomName, username, avatarUrl, res });
 });
+app.all("/token", (_req, res) =>
+  res.status(405).json({
+    error: "Используйте POST /token со свободным режимом или подключайтесь через запланированную встречу.",
+  }),
+);
 
 const createRecordingsSessionToken = () =>
   createSessionToken({
@@ -583,7 +586,7 @@ app.get("/recordings", requireRecordingsAuth, async (req, res) => {
   }
 });
 
-app.post("/recording/start", async (req, res) => {
+app.post("/recording/start", platform.auth, async (req, res) => {
   const roomName = String(req.body?.room || "").trim();
   if (!roomName) {
     return res.status(400).json({ error: "Field 'room' is required" });
@@ -632,7 +635,7 @@ app.post("/recording/start", async (req, res) => {
   }
 });
 
-app.post("/recording/stop", async (req, res) => {
+app.post("/recording/stop", platform.auth, async (req, res) => {
   const roomName = String(req.body?.room || "").trim();
   const egressIdFromBody = String(req.body?.egressId || "").trim();
   const active = roomName ? recordingByRoom.get(roomName) : null;
@@ -699,7 +702,7 @@ app.post("/recording/stop", async (req, res) => {
   }
 });
 
-app.get("/recording/status", async (req, res) => {
+app.get("/recording/status", platform.auth, async (req, res) => {
   const roomName = String(req.query.room || "").trim();
   if (!roomName) {
     return res.status(400).json({ error: "Query param 'room' is required" });
@@ -740,6 +743,14 @@ app.get("/recording/status", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Token server listening on http://localhost:${port}`);
-});
+platform
+  .init()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`VCLK server listening on http://localhost:${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to initialize platform database:", error);
+    process.exit(1);
+  });

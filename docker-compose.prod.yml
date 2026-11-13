@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vclk}
+      POSTGRES_USER: ${POSTGRES_USER:-vclk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -42,15 +57,24 @@ services:
       LIVEKIT_URL: ws://livekit:7888
       LIVEKIT_HTTP_URL: http://livekit:7888
       RECORDING_OUTPUT_PREFIX: /out
+      ATTACHMENTS_DIR: /attachments
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       ASR_QUEUE_KEY: ${ASR_QUEUE_KEY:-transcription:jobs}
       TRANSCRIPTION_ENABLED: ${TRANSCRIPTION_ENABLED:-true}
+      DATABASE_URL: ${DATABASE_URL:-postgres://vclk:${POSTGRES_PASSWORD}@postgres:5432/vclk}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${PUBLIC_HOSTNAME}}
     volumes:
       - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+      - ${ATTACHMENTS_HOST_PATH:-./attachments}:/attachments
     depends_on:
-      - livekit
-      - egress
-      - redis
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+      egress:
+        condition: service_started
+      redis:
+        condition: service_started
 
   asr-worker:
     build:
@@ -95,3 +119,4 @@ services:
 
 volumes:
   redis-data:
+  postgres-data:

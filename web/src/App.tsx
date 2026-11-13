@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import * as Tooltip from "@radix-ui/react-tooltip";
 import {
   getTrackReferenceId,
   isTrackReference,
@@ -35,12 +37,15 @@ import {
   parseRecordingStatusPayload,
   readJoinQueryParams,
   resolveSelectedTrack,
+  shouldAutoStartRecording,
   shouldHideChatName,
   shouldHideChatTimestamp,
   sortTracksByScreenSharePriority,
   tryParseJsonObject,
   type NetworkQuality,
 } from "./lib/meetingHelpers";
+import DashboardApp from "./DashboardApp";
+import { useToast } from "./ui/Toast";
 
 type TokenResponse = {
   token: string;
@@ -174,11 +179,13 @@ function MeetRoomLayout({
   roomName,
   inviteLink,
   backendUrl,
+  autoRecordEnabled = false,
   onLeave,
 }: {
   roomName: string;
   inviteLink: string;
   backendUrl: string;
+  autoRecordEnabled?: boolean;
   onLeave: () => void;
 }) {
   const participants = useParticipants();
@@ -193,15 +200,15 @@ function MeetRoomLayout({
   const [isCopied, setIsCopied] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingEgressId, setRecordingEgressId] = useState<string | null>(null);
-  const [recordingError, setRecordingError] = useState<string | null>(null);
-  const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
+  const autoRecordAttemptedRef = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showParticipants, setShowParticipants] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const [isMobileViewport, setIsMobileViewport] = useState(
     () => window.matchMedia("(max-width: 980px)").matches,
   );
+  const toast = useToast();
   const controlBarHostRef = useRef<HTMLDivElement | null>(null);
   const [controlBarElement, setControlBarElement] = useState<HTMLDivElement | null>(null);
   const isChatOpen = Boolean(layoutContext.widget.state?.showChat);
@@ -262,7 +269,7 @@ function MeetRoomLayout({
     try {
       const url = new URL("/recording/status", backendUrl);
       url.searchParams.set("room", roomName);
-      const response = await fetch(url);
+      const response = await fetch(url, { credentials: "include" });
       if (!response.ok) {
         return;
       }
@@ -297,69 +304,108 @@ function MeetRoomLayout({
       await navigator.clipboard.writeText(inviteLink);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 1200);
+      toast({ title: "Ссылка скопирована" });
     } catch {
       setIsCopied(false);
+      toast({ title: "Не удалось скопировать ссылку", tone: "error" });
     }
   };
 
+  const startRoomRecording = useCallback(async () => {
+    const endpoint = new URL("/recording/start", backendUrl);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room: roomName }),
+    });
+    const rawBody = await response.text();
+    const payload = tryParseJsonObject(rawBody);
+    if (payload === null) {
+      throw new Error("Не удалось начать запись: сервер вернул некорректный ответ.");
+    }
+    if (!response.ok) {
+      throw new Error(typeof payload.error === "string" ? payload.error : "Не удалось начать запись.");
+    }
+    setIsRecording(true);
+    setRecordingEgressId(typeof payload.egressId === "string" ? payload.egressId : null);
+    await fetchRecordingState();
+    return payload;
+  }, [backendUrl, fetchRecordingState, roomName]);
+
+  useEffect(() => {
+    if (
+      !shouldAutoStartRecording({
+        recordingEnabled: autoRecordEnabled,
+        participantCount: participants.length,
+        alreadyRecording: isRecording,
+        alreadyAttempted: autoRecordAttemptedRef.current,
+      })
+    ) {
+      return;
+    }
+    autoRecordAttemptedRef.current = true;
+    void startRoomRecording()
+      .then(() => {
+        toast({ title: "Запись началась", description: "В комнате два участника." });
+      })
+      .catch((error) => {
+        toast({
+          title: "Не удалось начать запись",
+          description: error instanceof Error ? error.message : undefined,
+          tone: "error",
+        });
+      });
+  }, [
+    autoRecordEnabled,
+    isRecording,
+    participants.length,
+    startRoomRecording,
+    toast,
+  ]);
+
   const onToggleRecording = async () => {
     setRecordingBusy(true);
-    setRecordingError(null);
-    setRecordingNotice(null);
     const stopping = isRecording;
     try {
-      const endpoint = new URL(
-        stopping ? "/recording/stop" : "/recording/start",
-        backendUrl,
-      );
-      const body = stopping
-        ? { room: roomName, egressId: recordingEgressId }
-        : { room: roomName };
+      if (!stopping) {
+        await startRoomRecording();
+        toast({ title: "Запись началась" });
+        setSettingsOpen(false);
+        return;
+      }
+      const endpoint = new URL("/recording/stop", backendUrl);
       const response = await fetch(endpoint, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ room: roomName, egressId: recordingEgressId }),
       });
       const rawBody = await response.text();
       const payload = tryParseJsonObject(rawBody);
       if (payload === null) {
-        throw new Error(
-          stopping
-            ? "Не удалось остановить запись: сервер вернул некорректный ответ."
-            : "Не удалось начать запись: сервер вернул некорректный ответ.",
-        );
+        throw new Error("Не удалось остановить запись: сервер вернул некорректный ответ.");
       }
       if (!response.ok) {
-        const message =
-          typeof payload.error === "string"
-            ? payload.error
-            : stopping
-              ? "Не удалось остановить запись."
-              : "Не удалось начать запись.";
-        throw new Error(message);
-      }
-      if (stopping) {
-        setIsRecording(false);
-        setRecordingEgressId(null);
-        if (typeof payload.warning === "string" && payload.warning) {
-          setRecordingNotice(payload.warning);
-        }
-      } else {
-        setIsRecording(true);
-        setRecordingEgressId(
-          typeof payload.egressId === "string" ? payload.egressId : null,
+        throw new Error(
+          typeof payload.error === "string" ? payload.error : "Не удалось остановить запись.",
         );
+      }
+      setIsRecording(false);
+      setRecordingEgressId(null);
+      if (typeof payload.warning === "string" && payload.warning) {
+        toast({ title: "Запись", description: payload.warning });
+      } else {
+        toast({ title: "Запись остановлена" });
       }
       await fetchRecordingState();
       setSettingsOpen(false);
     } catch (error) {
-      setRecordingError(
-        error instanceof Error
-          ? error.message
-          : stopping
-            ? "Не удалось остановить запись."
-            : "Не удалось начать запись.",
-      );
+      toast({
+        title: stopping ? "Не удалось остановить запись" : "Не удалось начать запись",
+        description: error instanceof Error ? error.message : undefined,
+        tone: "error",
+      });
       setSettingsOpen(false);
     } finally {
       setRecordingBusy(false);
@@ -426,6 +472,8 @@ function MeetRoomLayout({
               type="button"
               className="meet-copy-btn"
               onClick={() => setShowParticipants((prev) => !prev)}
+              aria-expanded={showParticipants}
+              aria-controls="meeting-participants"
             >
               {showParticipants ? "Скрыть участников" : "Показать участников"}
             </button>
@@ -439,7 +487,7 @@ function MeetRoomLayout({
         </header>
         <section className="meet-stage">
           <MeetChatDrawer isOpen={isChatOpen} onClose={onToggleChat} />
-          <aside className={`meet-participants-drawer ${showParticipants ? "is-open" : ""}`}>
+          <aside id="meeting-participants" aria-label="Участники встречи" className={`meet-participants-drawer ${showParticipants ? "is-open" : ""}`}>
             <div className="meet-participants-panel">
               <h3>Участники</h3>
               <ul>
@@ -501,6 +549,8 @@ function MeetRoomLayout({
                         role="button"
                         tabIndex={0}
                         className={`meet-thumb-button ${isActive ? "is-active" : ""}`}
+                        aria-pressed={isActive}
+                        aria-label={`Показать ${trackRef.participant.name || trackRef.participant.identity}`}
                         onClick={() => setSelectedTrackId(trackId)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") {
@@ -547,13 +597,8 @@ function MeetRoomLayout({
             {controlBarElement
               ? createPortal(
                   <div className="meet-toolbar-menu-wrapper">
-                    <button
-                      type="button"
-                      className="meet-layout-icon-btn"
-                      onClick={() => setSettingsOpen((prev) => !prev)}
-                      title="Меню вида и записи"
-                      aria-label="Меню вида и записи"
-                    >
+                    <DropdownMenu.Root open={settingsOpen} onOpenChange={setSettingsOpen}>
+                    <Tooltip.Root><Tooltip.Trigger asChild><DropdownMenu.Trigger className="meet-layout-icon-btn" aria-label="Меню вида и записи">
                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none">
                         <path
                           fill="currentcolor"
@@ -562,20 +607,14 @@ function MeetRoomLayout({
                           clipRule="evenodd"
                         />
                       </svg>
-                    </button>
-                    {settingsOpen ? (
-                      <div className="meet-toolbar-menu">
-                        <button
-                          type="button"
-                          onClick={() =>
+                    </DropdownMenu.Trigger></Tooltip.Trigger><Tooltip.Portal><Tooltip.Content className="radix-tooltip" side="top">Вид и запись</Tooltip.Content></Tooltip.Portal></Tooltip.Root>
+                    <DropdownMenu.Portal><DropdownMenu.Content className="meet-toolbar-menu" side="top" align="end" sideOffset={10}>
+                        <DropdownMenu.Item className="meet-menu-item" onSelect={() =>
                             setLayoutMode((prev) => (prev === "focus" ? "grid" : "focus"))
-                          }
-                        >
+                          }>
                           {layoutMode === "focus" ? "Вид: сетка 2x2" : "Вид: фокус"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={onToggleRecording}
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item className="meet-menu-item" onSelect={onToggleRecording}
                           disabled={recordingBusy}
                         >
                           {recordingBusy
@@ -583,9 +622,9 @@ function MeetRoomLayout({
                             : isRecording
                               ? "Остановить запись"
                               : "Начать запись"}
-                        </button>
-                      </div>
-                    ) : null}
+                        </DropdownMenu.Item>
+                    </DropdownMenu.Content></DropdownMenu.Portal>
+                    </DropdownMenu.Root>
                   </div>,
                   controlBarElement,
                 )
@@ -595,45 +634,6 @@ function MeetRoomLayout({
 
         <RoomAudioRenderer />
         <ConnectionStateToast />
-
-        {recordingError || recordingNotice ? (
-          <div
-            className="meet-modal-backdrop"
-            role="presentation"
-            onClick={() => {
-              setRecordingError(null);
-              setRecordingNotice(null);
-            }}
-          >
-            <div
-              className={`meet-modal ${recordingError ? "meet-modal--error" : "meet-modal--info"}`}
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="recording-modal-title"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="meet-modal-icon" aria-hidden="true">
-                {recordingError ? "!" : "i"}
-              </div>
-              <div className="meet-modal-body">
-                <h3 id="recording-modal-title">
-                  {recordingError ? "Ошибка записи" : "Запись"}
-                </h3>
-                <p>{recordingError || recordingNotice}</p>
-              </div>
-              <button
-                type="button"
-                className="meet-modal-close"
-                onClick={() => {
-                  setRecordingError(null);
-                  setRecordingNotice(null);
-                }}
-              >
-                Понятно
-              </button>
-            </div>
-          </div>
-        ) : null}
       </div>
     </LayoutContextProvider>
   );
@@ -663,8 +663,30 @@ function App() {
     () => buildSignalingProxyUrl(window.location.protocol, window.location.host),
     [],
   );
+  const meetingId = useMemo(
+    () => new URLSearchParams(window.location.search).get("meeting"),
+    [],
+  );
+  const [meetingTitle, setMeetingTitle] = useState<string | null>(null);
+  const [autoRecordEnabled, setAutoRecordEnabled] = useState(false);
+  const [scheduledReady, setScheduledReady] = useState(!meetingId);
+  const [freeMode, setFreeMode] = useState<boolean | null>(null);
 
-  const canJoin = useMemo(() => canJoinRoom(room, username), [room, username]);
+  useEffect(() => {
+    if (meetingId) {
+      setFreeMode(true);
+      return;
+    }
+    void fetch("/api/bootstrap", { credentials: "include" })
+      .then((response) => response.json())
+      .then((data: { freeMode?: boolean }) => setFreeMode(Boolean(data.freeMode)))
+      .catch(() => setFreeMode(false));
+  }, [meetingId]);
+
+  const canJoin = useMemo(
+    () => (meetingId ? Boolean(username.trim()) : Boolean(freeMode) && canJoinRoom(room, username)),
+    [freeMode, meetingId, room, username],
+  );
   const inviteLink = useMemo(
     () => buildInviteLink(window.location.href, room),
     [room],
@@ -683,6 +705,10 @@ function App() {
   }, [selectedVideoDeviceId]);
 
   useEffect(() => {
+    // Камера/микрофон нужны только в комнате ожидания (/room), не на dashboard.
+    if (token || window.location.pathname !== "/room") {
+      return;
+    }
     const mediaDevices = navigator.mediaDevices;
     if (!mediaDevices || !window.isSecureContext) {
       const httpsPort = window.location.protocol === "https:" ? window.location.port : "8443";
@@ -720,14 +746,60 @@ function App() {
       isCancelled = true;
       mediaDevices.removeEventListener("devicechange", loadDevices);
     };
-  }, [selectedAudioDeviceId, selectedVideoDeviceId]);
+  }, [selectedAudioDeviceId, selectedVideoDeviceId, token]);
 
   useEffect(() => {
-    if (token) {
-      if (previewStream) {
-        previewStream.getTracks().forEach((track) => track.stop());
+    if (!meetingId || token) {
+      return;
+    }
+    let cancelled = false;
+    const prepareScheduledMeeting = async () => {
+      setError(null);
+      setScheduledReady(false);
+      try {
+        const [meResponse, meetingResponse] = await Promise.all([
+          fetch("/api/auth/me", { credentials: "include" }),
+          fetch(`/api/meetings/${encodeURIComponent(meetingId)}`, { credentials: "include" }),
+        ]);
+        if (!meResponse.ok) {
+          window.location.assign(`/?next=${encodeURIComponent(`/room?meeting=${meetingId}`)}`);
+          return;
+        }
+        if (!meetingResponse.ok) {
+          const payload = await meetingResponse.json().catch(() => ({ error: "Встреча недоступна" }));
+          throw new Error(payload.error || "Встреча недоступна");
+        }
+        const me = (await meResponse.json()) as { user: { displayName: string } };
+        const meetingPayload = (await meetingResponse.json()) as {
+          meeting: { title: string; room_id: string };
+        };
+        if (!cancelled) {
+          setUsername(me.user.displayName || "");
+          setRoom(meetingPayload.meeting.room_id);
+          setMeetingTitle(meetingPayload.meeting.title);
+          setScheduledReady(true);
+        }
+      } catch (prepareError) {
+        if (!cancelled) {
+          setError(
+            prepareError instanceof Error ? prepareError.message : "Не удалось открыть встречу",
+          );
+          setScheduledReady(true);
+        }
       }
-      setPreviewStream(null);
+    };
+    void prepareScheduledMeeting();
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId, token]);
+
+  useEffect(() => {
+    if (token || window.location.pathname !== "/room") {
+      setPreviewStream((current) => {
+        current?.getTracks().forEach((track) => track.stop());
+        return null;
+      });
       return;
     }
 
@@ -914,9 +986,40 @@ function App() {
         }
       }
 
+      if (meetingId) {
+        const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/join`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: username.trim(),
+            avatarUrl: avatarUrlForToken,
+          }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({ error: "Не удалось подключиться" }));
+          throw new Error(payload.error || "Не удалось подключиться");
+        }
+        const payload = (await response.json()) as {
+          token: string;
+          roomName: string;
+          meeting?: { recording_enabled?: boolean };
+        };
+        setRoom(payload.roomName);
+        setAutoRecordEnabled(Boolean(payload.meeting?.recording_enabled));
+        setToken(payload.token);
+        setServerUrl(signalingProxyUrl);
+        return;
+      }
+
+      if (!freeMode) {
+        throw new Error("Свободный режим отключён администратором. Войдите через запланированную встречу.");
+      }
+
       const endpoint = new URL("/token", backendUrl);
       const response = await fetch(endpoint, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           room: room.trim(),
@@ -925,8 +1028,8 @@ function App() {
         }),
       });
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "Failed to get token");
+        const payload = await response.json().catch(() => ({ error: "Не удалось получить токен" }));
+        throw new Error(payload.error || "Не удалось получить токен");
       }
 
       const data = (await response.json()) as TokenResponse;
@@ -942,6 +1045,10 @@ function App() {
       setIsJoining(false);
     }
   };
+
+  if (!token && window.location.pathname !== "/room") {
+    return <DashboardApp />;
+  }
 
   if (token) {
     return (
@@ -961,6 +1068,7 @@ function App() {
             roomName={room}
             inviteLink={inviteLink}
             backendUrl={backendUrl}
+            autoRecordEnabled={autoRecordEnabled}
             onLeave={() => setToken(null)}
           />
         </LiveKitRoom>
@@ -1050,56 +1158,82 @@ function App() {
       </section>
 
       <form className="join-card" onSubmit={onJoin}>
-        <h2>Вход в комнату</h2>
+        <h2>{meetingId ? "Проверка перед входом" : "Вход в комнату"}</h2>
+        <p className="join-dashboard-link">
+          {meetingId
+            ? "Проверьте камеру и микрофон, затем подключитесь к встрече."
+            : freeMode
+              ? <>Укажите имя и код комнаты. Список запланированных встреч — в <a href="/">dashboard VCLK</a>.</>
+              : <>Свободный режим отключён. Запланированные встречи доступны в <a href="/">dashboard VCLK</a>.</>}
+        </p>
 
-        <label>
-          Ваше имя
-          <input
-            type="text"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            placeholder="Алиса"
-            autoComplete="off"
-            required
-          />
-        </label>
-
-        <label>
-          Код комнаты
-          <input
-            type="text"
-            value={room}
-            onChange={(event) => setRoom(event.target.value)}
-            placeholder="demo-room"
-            autoComplete="off"
-            required
-          />
-        </label>
-
-        <label>
-          Ссылка-приглашение
-          <input type="text" value={inviteLink} readOnly />
-        </label>
-
-        <details className="advanced">
-          <summary>Расширенные настройки</summary>
+        {meetingId ? (
           <label>
-            URL сервера токенов
+            Встреча
+            <input type="text" value={meetingTitle || (scheduledReady ? "…" : "Загрузка…")} readOnly />
+          </label>
+        ) : null}
+
+        {meetingId || freeMode ? (
+          <label>
+            Ваше имя
             <input
-              type="url"
-              value={backendUrl}
-              onChange={(event) => setBackendUrl(event.target.value)}
-              placeholder={window.location.origin}
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Алиса"
+              autoComplete="name"
               required
             />
           </label>
-        </details>
+        ) : null}
+
+        {!meetingId && freeMode ? (
+          <>
+            <label>
+              Код комнаты
+              <input
+                type="text"
+                value={room}
+                onChange={(event) => setRoom(event.target.value)}
+                placeholder="demo-room"
+                autoComplete="off"
+                required
+              />
+            </label>
+
+            <label>
+              Ссылка-приглашение
+              <input type="text" value={inviteLink} readOnly />
+            </label>
+
+            <details className="advanced">
+              <summary>Расширенные настройки</summary>
+              <label>
+                URL сервера токенов
+                <input
+                  type="url"
+                  value={backendUrl}
+                  onChange={(event) => setBackendUrl(event.target.value)}
+                  placeholder={window.location.origin}
+                  required
+                />
+              </label>
+            </details>
+          </>
+        ) : null}
 
         {error ? <p className="error">{error}</p> : null}
 
-        <button type="submit" disabled={!canJoin || isJoining}>
-          {isJoining ? "Подключение..." : "Войти"}
-        </button>
+        <div className="join-card-actions">
+          {meetingId || freeMode ? (
+            <button type="submit" disabled={!canJoin || isJoining || (Boolean(meetingId) && !scheduledReady) || freeMode === null}>
+              {isJoining ? "Подключение..." : meetingId ? "Подключиться к встрече" : "Войти"}
+            </button>
+          ) : (
+            <a className="primary-link-btn" href="/">Открыть dashboard</a>
+          )}
+        </div>
       </form>
     </main>
   );

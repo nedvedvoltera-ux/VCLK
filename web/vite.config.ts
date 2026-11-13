@@ -15,6 +15,9 @@ export default defineConfig({
       "/token": {
         target: backendTarget,
       },
+      "/api": {
+        target: backendTarget,
+      },
       "/health": {
         target: backendTarget,
       },

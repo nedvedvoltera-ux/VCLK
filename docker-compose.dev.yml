@@ -1,4 +1,16 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vclk
+      POSTGRES_USER: vclk
+      POSTGRES_PASSWORD: vclk-dev-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -18,7 +30,7 @@ services:
     ports:
       - "7888:7888/tcp"
       - "7882:7882/tcp"
-      - "50000-50100:50000-50100/udp"
+      - "51000-51100:51000-51100/udp"
 
   egress:
     image: livekit/egress:latest
@@ -43,15 +55,20 @@ services:
       LIVEKIT_URL: ws://livekit:7888
       LIVEKIT_HTTP_URL: http://livekit:7888
       RECORDING_OUTPUT_PREFIX: /out
+      ATTACHMENTS_DIR: /attachments
+      DATABASE_URL: postgres://vclk:vclk-dev-password@postgres:5432/vclk
+      PUBLIC_BASE_URL: https://localhost:5173
     command: >
       sh -c "npm install && npm run dev"
     volumes:
       - ./server:/app
       - server-node-modules:/app/node_modules
       - ${RECORDINGS_HOST_PATH:-./recordings}:/out
+      - ${ATTACHMENTS_HOST_PATH:-./attachments}:/attachments
     ports:
       - "3101:3101"
     depends_on:
+      - postgres
       - livekit
       - egress
 
@@ -74,6 +91,7 @@ services:
       - livekit
 
 volumes:
+  postgres-dev-data:
   redis-dev-data:
   server-node-modules:
   web-node-modules:
