@@ -1,0 +1,70 @@
+name: Vclk
+
+options:
+  bundleIdPrefix: ru.asntl
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    # Укажите свою команду (Xcode → Signing & Capabilities) или впишите Team ID сюда.
+    DEVELOPMENT_TEAM: ""
+
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    exactVersion: 2.12.1
+
+targets:
+  Vclk:
+    type: application
+    platform: iOS
+    sources:
+      - path: Vclk
+    dependencies:
+      - package: LiveKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.asntl.vclk
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_PREVIEWS: YES
+    info:
+      path: Vclk/Info.plist
+      properties:
+        CFBundleDisplayName: VCLK
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSCameraUsageDescription: Камера нужна для видеовстреч и фото профиля.
+        NSMicrophoneUsageDescription: Микрофон нужен для участия во встречах.
+        NSPhotoLibraryUsageDescription: Фото из галереи можно использовать как фото профиля.
+        NSLocalNetworkUsageDescription: Приложение подключается к серверу видеовстреч в вашей локальной сети.
+        # Корпоративный сервер может работать по http в локальной сети.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+
+  VclkTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: VclkTests
+    dependencies:
+      - target: Vclk
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: ru.asntl.vclk.tests

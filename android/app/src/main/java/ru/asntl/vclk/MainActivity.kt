@@ -90,8 +90,9 @@ class MainActivity : ComponentActivity() {
                 vm.checking -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 invite != null -> InviteScreen(vm, invite)
                 session != null -> RoomScreen(vm, session)
+                // Свободная комната доступна и без учётной записи.
+                target != null && (vm.user != null || target.meetingId == null) -> WaitingRoomScreen(vm, target)
                 vm.user == null -> AuthScreen(vm)
-                target != null -> WaitingRoomScreen(vm, target)
                 else -> MainScreen(vm)
             }
             SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter).statusBarsPadding())

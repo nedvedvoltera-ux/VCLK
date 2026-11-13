@@ -22,6 +22,7 @@
 | P09 | Вложения к встрече до 20 МБ, ручное подтверждение и rate limit | Dashboard | API + manual |
 | P10 | Повторяющаяся встреча: тугл + период день/неделя/месяц, в то же время | Форма встречи, календарь | unit (`recurrence.test.js`, RRULE) + manual |
 | P11 | Android-приложение (Kotlin + LiveKit SDK): вход, обзор, календарь, встречи, вложения, комната ожидания, комната общения, запись; без разделов настроек | `android/` | unit (`HelpersTest`, `CalendarMathTest`) + manual |
+| P12 | iOS-приложение (SwiftUI + LiveKit Swift SDK), те же экраны, что в Android; без разделов настроек и демонстрации своего экрана | `ios/` | unit (`HelpersTests`, `CalendarMathTests`, запускаются в Xcode) + manual |
 
 ---
 
